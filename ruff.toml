@@ -1,0 +1,39 @@
+line-length = 119
+target-version = "py314"
+
+[lint]
+select = [
+    "E", "F", "W",  # pycodestyle + pyflakes
+    "I",            # isort
+    "N",            # pep8-naming
+    "UP",           # pyupgrade
+    "B",            # flake8-bugbear
+    "S",            # flake8-bandit
+    "SIM",          # flake8-simplify
+    "RET",          # flake8-return
+    "PIE",          # flake8-pie
+    "TCH",          # flake8-type-checking
+    "YTT",          # flake8-2020
+    "D",            # pydocstyle
+]
+ignore = [
+    "D203",  # one-blank-line-before-class -- conflicts with D211
+    "D213",  # multi-line-summary-second-line -- conflicts with D212
+]
+
+[lint.pydocstyle]
+convention = "google"
+
+[lint.mccabe]
+max-complexity = 15
+
+[lint.per-file-ignores]
+# assert is the idiomatic way to write a test assertion; it's disallowed
+# in application code because `python -O` strips asserts at runtime.
+"tests/**" = ["S101", "D"]
+# The demo is a script meant to be read top to bottom next to the post:
+# module-level statements, prints, and no per-section docstrings.
+"demo/**" = ["D", "T201"]
+
+[format]
+quote-style = "single"

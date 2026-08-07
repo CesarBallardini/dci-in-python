@@ -1,0 +1,17 @@
+name: pytest
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    # No service containers: this domain is in-memory on purpose. If the
+    # integration tests ever grow a real database, they get added here.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --all-groups --frozen
+      - run: uv run --frozen pytest -n auto --cov=banking --cov-report=xml
+      - run: uv run --frozen python demo/dci_demo.py
