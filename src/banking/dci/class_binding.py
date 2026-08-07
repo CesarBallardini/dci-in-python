@@ -32,9 +32,13 @@ class Context(BaseContext):
     * binding is illegal on classes with `__slots__`, because the object layout
       differs, and on frozen dataclasses, because `__class__` is an attribute
       like any other and the generated `__setattr__` refuses all of them;
-    * two live contexts over the same object produce an unsolvable MRO, because
-      `__class__` is state of the *object* while DCI uses it as though it were
-      state of the *context*;
+    * two live contexts over the same object produce an unsolvable MRO when they
+      want the same role, because `__class__` is state of the *object* while DCI
+      uses it as though it were state of the *context*;
+    * two live contexts wanting *different* roles of the same object bind
+      without complaint, and each restores the class it found on the way in. Two
+      that overlap without nesting therefore leave the object playing the first
+      one's role permanently, and nothing raises to say so;
     * the synthesized class exists in no source file, so a traceback names a
       class that cannot be opened, and no type checker can be shown it.
     """

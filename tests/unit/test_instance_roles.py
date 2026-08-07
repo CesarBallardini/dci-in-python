@@ -4,9 +4,14 @@
 `InstanceContext` makes instead. Two of those failures do not occur here -- the
 frozen dataclass and the synthesized class name -- and a third, the
 declaratively mapped ORM entity, is covered in
-`tests/integration/test_orm_roles.py`. In exchange, pickling fails later
-instead of earlier, a role can no longer contribute a special method, and two
-overlapping contexts corrupt each other silently.
+`tests/integration/test_orm_roles.py`. Two costs are taken on in exchange: a
+role can no longer contribute a special method, and pickling fails on load
+rather than on dump, which moves the failure into another process.
+
+A third is not among them. Two overlapping contexts do not corrupt each other:
+`_bind` refuses to write over a name the object already has, so the second
+context is turned away at the scene with a `RuntimeError`. That is asserted
+below alongside the two costs that remain.
 
 Each test is paired against `MoneyTransferContext` where the contrast matters,
 so the two mechanisms are compared by running them rather than by describing
@@ -15,8 +20,12 @@ them.
 
 from __future__ import annotations
 
+import base64
+import contextvars
 import copy
 import pickle
+import subprocess
+import sys
 import threading
 import time
 import types
@@ -212,6 +221,41 @@ def test_neither_binder_survives_pickling_but_they_fail_differently(alice: Accou
 
 
 @pytest.mark.unit
+def test_the_bytes_fail_in_whichever_process_reads_them(alice: Account, bob: Account) -> None:
+    """The load failure crosses the process boundary, which is the cost itself.
+
+    The test above reads the bytes back where they were written, one line from
+    the mistake. This one hands them to a fresh interpreter -- the worker
+    reading the queue, the request that reads the cache -- which imports
+    `banking`, rebuilds an ordinary `Account`, finds no `transfer` for
+    `getattr` to call, and dies with a traceback that names neither a role nor
+    a context nor the transfer that has long since returned.
+
+    Under `Context` there is nothing to hand over: `dumps` raised in the
+    process that called it, and no bytes were produced.
+    """
+    blob = b''
+    with InstanceMoneyTransferContext(alice, bob, Money(10)):
+        blob = pickle.dumps(alice)
+
+    reader = subprocess.run(  # noqa: S603 -- this interpreter, a literal script, one argument
+        [
+            sys.executable,
+            '-c',
+            'import base64, pickle, sys; pickle.loads(base64.b64decode(sys.argv[1]))',
+            base64.b64encode(blob).decode(),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+
+    assert reader.returncode != 0
+    assert "'Account' object has no attribute 'transfer'" in reader.stderr
+
+
+@pytest.mark.unit
 def test_deepcopy_survives_either_binder(alice: Account, bob: Account) -> None:
     """`copy.deepcopy` does not need to name the class, so it goes through."""
     with MoneyTransferContext(alice, bob, Money(10)):
@@ -281,7 +325,7 @@ def test_a_failed_binding_leaves_nothing_behind() -> None:
 
 
 # ---------------------------------------------------------------------------
-# What it costs: two problems `Context` does not have
+# What it costs: the special method it cannot lend
 # ---------------------------------------------------------------------------
 
 
@@ -309,6 +353,11 @@ def test_a_role_cannot_contribute_a_dunder() -> None:
     assert (amount < Money(1)) is False
 
 
+# ---------------------------------------------------------------------------
+# What it does not cost: two live contexts are refused, not silently merged
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.unit
 def test_two_live_contexts_are_refused_at_the_scene() -> None:
     """The second context is turned away where `Context` raises its MRO error.
@@ -332,6 +381,43 @@ def test_two_live_contexts_are_refused_at_the_scene() -> None:
     assert hasattr(shared, 'transfer')
     first.__exit__()
     assert not hasattr(shared, 'transfer')
+
+
+@pytest.mark.unit
+def test_two_contexts_wanting_different_roles_give_the_object_back_intact() -> None:
+    """The overlap that `Context` cannot survive at all is unremarkable here.
+
+    One account paying a transfer out while a second transfer pays into it
+    needs two different roles, so the names do not collide and both contexts
+    bind. Under `Context` this is where the account is lost:
+    `test_overlapping_exits_leave_the_role_bound_for_good` in
+    `tests/unit/test_limits.py` shows the second context restoring a class that
+    still carries the first one's role, permanently and without an error.
+
+    `_bind` records the names it wrote and `_strip` removes exactly those, so
+    the order the two contexts leave in does not matter. The account comes out
+    of the pair holding nothing.
+
+    The scenario runs in a `contextvars.Context` of its own: leaving the two in
+    this order also leaves a finished context installed, which is a property of
+    the shared base rather than of this binder, and it is measured next to the
+    binder it damages.
+    """
+    shared = Account('Erin', Money(1000))
+    paying_out = InstanceMoneyTransferContext(shared, Account('Frank', Money(0)), Money(10))
+    paid_into = InstanceMoneyTransferContext(Account('Grace', Money(500)), shared, Money(20))
+
+    def scenario() -> list[str]:
+        paying_out.__enter__()
+        paid_into.__enter__()
+        both = sorted(vars(shared))
+        paying_out.__exit__()  # the transfer that opened first also closes first
+        paid_into.__exit__()
+        return both
+
+    assert contextvars.copy_context().run(scenario) == ['balance', 'holder', 'receive', 'transfer']
+    assert sorted(vars(shared)) == ['balance', 'holder']
+    assert type(shared) is Account
 
 
 @pytest.mark.unit

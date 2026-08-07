@@ -74,6 +74,24 @@ Feature: Four ways to lend a role, and what each one costs
       | binder   | result                                    |
       | instance | the thread that arrived second is refused |
 
+  Scenario Outline: One account paying a transfer out while another pays into it
+    Given a shared account with 1000000 ARS
+    When two threads run a transfer out of it and a transfer into it with the <binder> binder
+    Then <result>
+
+    Examples: the two roles stack, so nothing refuses -- and the last one out puts the first one's role back
+      | binder      | result                                      |
+      | class       | the account is left playing a role for good |
+      | transparent | the account is left playing a role for good |
+
+    Examples: holding the participants keeps the two transfers from overlapping at all
+      | binder     | result                      |
+      | serialized | the account is itself again |
+
+    Examples: instance binding takes back only the names it wrote, so the order it leaves in does not matter
+      | binder   | result                      |
+      | instance | the account is itself again |
+
   Scenario Outline: A role that wants to contribute a special method
     When a role defining __lt__ is lent to an amount with the <binder> binder
     Then the less-than operator on the amount <outcome>

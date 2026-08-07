@@ -100,7 +100,7 @@ The layout follows the three letters, plus two packages for comparison:
 
 ## Current state
 
-The code is complete and green: ruff clean, pyright 0 errors, pyrefly 0 errors **and 0 suppressed**, 137 tests passing, demo exits 0, security scans clean.
+The code is complete and green: ruff clean, pyright 0 errors, pyrefly 0 errors **and 0 suppressed**, 150 tests passing, demo exits 0, security scans clean.
 
 **The blog post is also complete.** All five phases of the plan, and the three later findings, have been applied: the console blocks, the code blocks and the diagram are synchronized with the repository; the four breakages are written up, including `@dataclass(frozen=True)` and `attrs`; the two `BaseContext` guards are explained; the four binders have their own section with the comparison table; the persistence finding has its own section; the five designs are compared; Feathers' objection is answered using the third role; and the arc back to part 1 is closed from both ends.
 

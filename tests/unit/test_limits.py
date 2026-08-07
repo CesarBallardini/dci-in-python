@@ -7,9 +7,11 @@ them fails the suite, rather than leaving the documentation quietly wrong.
 
 from __future__ import annotations
 
+import contextvars
 import threading
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import attrs
 import pytest
@@ -17,6 +19,20 @@ import pytest
 from banking.contexts.money_transfer import MoneyTransferContext
 from banking.data.account import Account
 from banking.data.money import Money
+from banking.dci import context
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
+def in_a_fresh_context[Result](work: Callable[[], Result]) -> Result:
+    """Run `work` with a `ContextVar` state of its own, and return what it returns.
+
+    Three of the tests below leave a finished context installed, which is part
+    of what they measure. `contextvars.copy_context()` gives the scenario its
+    own copy of that state, so the leftover cannot reach the tests that follow.
+    """
+    return contextvars.copy_context().run(work)
 
 
 class SlottedAccount:
@@ -141,6 +157,180 @@ def test_two_live_contexts_over_one_account_collide() -> None:
         first.__exit__()
 
     assert type(shared).__name__ == 'Account'
+
+
+@pytest.mark.unit
+def test_two_live_contexts_wanting_different_roles_bind_without_complaint() -> None:
+    """The MRO error only fires when the second context wants the *same* role.
+
+    An account paying one transfer out while a second transfer pays into it is
+    an ordinary pair of requests, and `DestinationAccount` over
+    `Account@SourceAccount` has a consistent MRO. Nothing refuses, so the
+    collision above is not a guard against two live contexts over one object:
+    it is what happens when one role is stacked on itself.
+
+    Unwound in the order a nested pair of `with` blocks would unwind, the stack
+    still comes apart cleanly. That order is the only thing holding it
+    together, and the next test is what happens without it.
+    """
+    shared = Account('Erin', Money(1000))
+    paying_out = MoneyTransferContext(shared, Account('Frank', Money(0)), Money(10))
+    paid_into = MoneyTransferContext(Account('Grace', Money(500)), shared, Money(20))
+
+    def scenario() -> list[str]:
+        paying_out.__enter__()
+        paid_into.__enter__()
+        stacked = [cls.__name__ for cls in type(shared).__mro__]
+        paid_into.__exit__()
+        paying_out.__exit__()
+        return stacked
+
+    assert in_a_fresh_context(scenario) == [
+        'Account@SourceAccount@DestinationAccount',
+        'DestinationAccount',
+        'Account@SourceAccount',
+        'SourceAccount',
+        'Account',
+        'object',
+    ]
+    assert type(shared) is Account
+
+
+@pytest.mark.unit
+def test_overlapping_exits_leave_the_role_bound_for_good() -> None:
+    """Each context restores the class it found, which is correct only while they nest.
+
+    Two requests that overlap without nesting -- the one that opened first is
+    also the one that closes first -- make the second put back a class that
+    already carries the first one's role. Nothing raises anywhere along the
+    way. The account comes out of the pair of transfers still playing
+    `SourceAccount`, with no context running and nothing to take the role back.
+    """
+    shared = Account('Erin', Money(1000))
+    paying_out = MoneyTransferContext(shared, Account('Frank', Money(0)), Money(10))
+    paid_into = MoneyTransferContext(Account('Grace', Money(500)), shared, Money(20))
+
+    def scenario() -> None:
+        paying_out.__enter__()
+        paid_into.__enter__()
+        paying_out.__exit__()  # the transfer that opened first also closes first
+        paid_into.__exit__()
+
+    in_a_fresh_context(scenario)
+
+    assert type(shared).__name__ == 'Account@SourceAccount'
+    assert hasattr(shared, 'transfer')
+    # And it passes every check anyone would think to write about it.
+    assert isinstance(shared, Account)
+
+
+@pytest.mark.unit
+def test_the_left_over_role_breaks_the_next_transfer_out_of_that_account() -> None:
+    """This is what makes the leak permanent rather than cosmetic.
+
+    The account is now an `Account@SourceAccount` outside every context, so the
+    next context that asks it to play `SourceAccount` stacks the role on itself
+    and gets the MRO error of the first test. The request that fails is one
+    that did nothing wrong, arbitrarily later, and the two transfers that
+    caused it have long since returned successfully.
+    """
+    shared = Account('Erin', Money(1000))
+    paying_out = MoneyTransferContext(shared, Account('Frank', Money(0)), Money(10))
+    paid_into = MoneyTransferContext(Account('Grace', Money(500)), shared, Money(20))
+
+    def scenario() -> None:
+        paying_out.__enter__()
+        paid_into.__enter__()
+        paying_out.__exit__()
+        paid_into.__exit__()
+
+    in_a_fresh_context(scenario)
+
+    with pytest.raises(TypeError, match=r'[Cc]onsistent method resolution\s+order'):
+        MoneyTransferContext(shared, Account('Heidi', Money(0)), Money(1)).execute()
+
+
+@pytest.mark.unit
+def test_the_first_context_to_leave_strips_the_role_from_the_one_still_inside() -> None:
+    """The other half of the overlap, and it lands on a transfer in flight.
+
+    The leak is what is left afterwards; this is what happens during. When the
+    first context restores the account's original class, the second context is
+    still running and loses `DestinationAccount` from under it, so the transfer
+    that was mid-script fails on a missing `receive` with nothing in the
+    message about roles, contexts or the other request.
+
+    Two threads rather than one call after another, because each thread has its
+    own `ContextVar` state: in a single thread the second context's roles are
+    reached through a variable the first exit already popped, and the failure
+    arrives as a `LookupError` before it can get as far as the missing method.
+    Two requests is the shape this takes in a server, and it is the shape that
+    reaches the account.
+    """
+    shared = Account('Erin', Money(1000))
+    paying_out_inside = threading.Event()
+    paid_into_inside = threading.Event()
+    paying_out_left = threading.Event()
+    failures: list[str] = []
+
+    def paying_out() -> None:
+        held = MoneyTransferContext(shared, Account('Frank', Money(0)), Money(5))
+        with held:
+            paying_out_inside.set()
+            paid_into_inside.wait(2)
+            held.run_script()
+        paying_out_left.set()
+
+    def paid_into() -> None:
+        paying_out_inside.wait(2)
+        held = MoneyTransferContext(Account('Grace', Money(1000)), shared, Money(7))
+        try:
+            with held:
+                paid_into_inside.set()
+                paying_out_left.wait(2)  # the other transfer leaves inside this gap
+                held.run_script()
+        except AttributeError as exc:
+            failures.append(str(exc))
+
+    threads = [threading.Thread(target=paying_out), threading.Thread(target=paid_into)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+
+    assert failures == ["'Account' object has no attribute 'receive'"]
+    # And the leak is still there underneath, so the account carries both
+    # consequences of one overlap.
+    assert type(shared).__name__ == 'Account@SourceAccount'
+
+
+@pytest.mark.unit
+def test_the_overlapping_exit_also_leaves_a_finished_context_installed() -> None:
+    """The class is not the only state put back wrong; the `ContextVar` is too.
+
+    A `Token` restores the value it replaced, and the value the second context
+    replaced was the first context. Resetting the two out of order therefore
+    reinstalls a context that has already finished, and a role called
+    afterwards -- through the class the previous test left behind -- reaches
+    `context()` and is handed it: participants that no longer hold their roles,
+    and an amount that is a plain `Money` again.
+
+    Both guards in `BaseContext` are working correctly here. Neither one is
+    about this: they cover a context that fails part-way and a context entered
+    twice, and this is two contexts that each succeeded.
+    """
+    shared = Account('Erin', Money(1000))
+    paying_out = MoneyTransferContext(shared, Account('Frank', Money(0)), Money(10))
+    paid_into = MoneyTransferContext(Account('Grace', Money(500)), shared, Money(20))
+
+    def scenario() -> bool:
+        paying_out.__enter__()
+        paid_into.__enter__()
+        paying_out.__exit__()
+        paid_into.__exit__()
+        return context() is paying_out
+
+    assert in_a_fresh_context(scenario)
 
 
 @pytest.mark.unit

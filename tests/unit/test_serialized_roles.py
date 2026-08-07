@@ -12,7 +12,10 @@ that must hold before that counts as a solution:
 3. transfers that share no participant still run in parallel, so this is not
    a global lock;
 4. transfers in opposite directions between the same two accounts do not
-   deadlock.
+   deadlock;
+5. the overlap that raises *no* error -- two contexts wanting different roles
+   of the same account, which leaves the role bound for good -- is closed as
+   well, up to the one boundary a lock cannot cover.
 """
 
 from __future__ import annotations
@@ -147,6 +150,96 @@ def test_opposite_directions_do_not_deadlock() -> None:
 
     assert failures == []
     assert erin.balance + frank.balance == Money(2000)
+
+
+@pytest.mark.unit
+def test_it_also_closes_the_overlap_that_reports_no_error_at_all() -> None:
+    """The leak of `test_limits.py`, run against the locking binder.
+
+    One account paying out while another transfer pays into it is the case the
+    MRO error does not catch: `DestinationAccount` stacks over
+    `Account@SourceAccount` without complaint, and whichever context leaves
+    last puts back a class that still carries the other's role. Unlocked, the
+    account ends the pair of transfers permanently playing `SourceAccount` and
+    nothing raises to say so.
+
+    Both accounts are deliberately slow, so the two transfers hold their
+    participants long enough that an unlocked run would overlap on nearly every
+    round rather than only occasionally.
+    """
+    rounds = 20
+    failures: list[str] = []
+
+    class SlowAccount(Account):
+        """Slow enough on both sides that two transfers touching it must overlap."""
+
+        def debit(self, amount: Money) -> None:
+            time.sleep(0.01)
+            super().debit(amount)
+
+        def credit(self, amount: Money) -> None:
+            time.sleep(0.01)
+            super().credit(amount)
+
+    shared = SlowAccount('Erin', Money(1000))
+    frank = Account('Frank', Money(0))
+    grace = SlowAccount('Grace', Money(1000))
+
+    def transfer(source: Account, destination: Account) -> None:
+        try:
+            for _ in range(rounds):
+                SerializedMoneyTransferContext(source, destination, Money(1)).execute()
+        except Exception as exc:  # noqa: BLE001 -- the test is about what escapes
+            failures.append(type(exc).__name__)
+
+    run_all(
+        [
+            threading.Thread(target=transfer, args=(shared, frank)),
+            threading.Thread(target=transfer, args=(grace, shared)),
+        ]
+    )
+
+    assert failures == []
+    # The account is itself again, which is the assertion the unlocked version
+    # of this scenario fails without raising anything.
+    assert type(shared) is SlowAccount
+    assert not hasattr(shared, 'transfer')
+    assert (shared.balance, frank.balance, grace.balance) == (Money(1000), Money(rounds), Money(1000 - rounds))
+
+
+@pytest.mark.unit
+def test_one_thread_reaches_the_leak_through_the_locking_binder_too() -> None:
+    """The boundary of what the lock covers, and it is wider than the MRO error.
+
+    The `RLock` is re-entrant to whoever holds it, so a single thread opening
+    two contexts over one account is never made to wait. When both contexts
+    want the same role that is harmless, because the MRO error arrives before
+    anything is changed -- the case the table records. When they want different
+    roles nothing refuses, and one thread reaches the leak through the locking
+    binder exactly as it does through `Context`.
+
+    The lock serializes *threads*. It is not a claim about one thread holding
+    two live contexts over one object, which remains a defect in the calling
+    code, and this is the shape that defect takes when it goes unreported.
+
+    The scenario runs on a thread of its own so that the finished context it
+    leaves installed cannot reach the rest of the suite.
+    """
+    shared = Account('Erin', Money(1000))
+    leftover: list[str] = []
+
+    def scenario() -> None:
+        paying_out = SerializedMoneyTransferContext(shared, Account('Frank', Money(0)), Money(10))
+        paid_into = SerializedMoneyTransferContext(Account('Grace', Money(500)), shared, Money(20))
+        paying_out.__enter__()
+        paid_into.__enter__()
+        paying_out.__exit__()
+        paid_into.__exit__()
+        leftover.append(type(shared).__name__)
+
+    run_all([threading.Thread(target=scenario)])
+
+    assert leftover == ['Account@SourceAccount']
 
 
 @pytest.mark.unit

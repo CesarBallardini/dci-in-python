@@ -53,17 +53,22 @@ class InstanceContext(BaseContext):
       this object with this name" -- and produces bytes that cannot be loaded,
       because the reconstructed object has no such attribute. The failure moves
       out of the process that made the mistake.
-    * **Two live contexts are refused rather than serialized.** `_bind` will not
-      write over a name the object already has, so the second context raises
-      `RuntimeError` where `Context` raises an MRO error -- both at the scene,
-      neither of them a way to run two contexts at once. Only
-      `SerializedContext` does that. The check is what keeps `_strip` honest as
-      well: a context can only ever remove the names it installed itself, so no
-      exit takes a method another context is still using.
+    * **Two live contexts wanting the same role are refused rather than
+      serialized.** `_bind` will not write over a name the object already has,
+      so the second context raises `RuntimeError` where `Context` raises an MRO
+      error -- both at the scene, neither of them a way to run two contexts over
+      one object at once. Only `SerializedContext` does that.
 
     The refusal is a check, not a lock. Two threads entering at the same
     instant can both find the name absent and both write; the window is narrow
     but real, and closing it is what `SerializedContext` is for.
+
+    That check is also what makes this the one binder that survives the overlap
+    `Context` does not report. Two contexts wanting *different* roles of one
+    object collide over no name, so both bind; and because a context can only
+    ever remove the names it installed itself, the order they leave in does not
+    matter and no exit takes a method another context is still using. Under
+    `Context` the same overlap leaves the object playing a role for good.
     """
 
     def _bind(self, obj: object, role: type) -> None:

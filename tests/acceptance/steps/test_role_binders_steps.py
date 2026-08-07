@@ -1,10 +1,11 @@
 """Step definitions for role_binders.feature.
 
-`APPROACHES.md` contains a table with four columns and nine rows. Tables are
+`APPROACHES.md` contains a table with four columns and ten rows. Tables are
 easy to write and easy to get wrong, so every cell of it is an example row
-here. Two cells carry a qualification a table cannot express: the locking
-binder serializes *across threads* but re-enters within one, and the instance
-binder declines to bind a dunder rather than binding one that could never run.
+here. Three cells carry a qualification a table cannot express: the locking
+binder serializes *across threads* but re-enters within one, twice over, and
+the instance binder declines to bind a dunder rather than binding one that
+could never run.
 """
 
 from __future__ import annotations
@@ -373,6 +374,84 @@ def second_thread_is_refused(accounts: dict, running: dict) -> None:
     """
     assert running['failures'] == [('fast', 'RuntimeError')]
     assert accounts['shared'].balance == Money(1_000_000 - 5)
+
+
+@when(parsers.parse('two threads run a transfer out of it and a transfer into it with the {binder} binder'))
+def two_threads_wanting_different_roles(accounts: dict, running: dict, binder: str) -> None:
+    """The overlap that raises nothing: one thread wants `SourceAccount`, the other `DestinationAccount`.
+
+    `DestinationAccount` over `Account@SourceAccount` has a consistent MRO, so
+    the class binders have nothing to refuse and the interleave is the whole
+    measurement. Each thread holds its context open until the other has run its
+    part, so the two leave in the order they arrived rather than nested -- which
+    is what makes a class binder restore a class that still carries the other's
+    role.
+
+    Both waits are bounded, because one binder is expected not to allow the
+    overlap in the first place: under `SerializedContext` the second thread is
+    still waiting for the account when the first gives up waiting for it, and
+    that is the property being measured rather than a hang.
+    """
+    context_class = BINDERS[binder]
+    shared = accounts['shared']
+    failures: list[tuple[str, str]] = running['failures']
+    paying_out_inside = threading.Event()
+    paid_into_ran = threading.Event()
+    paying_out_left = threading.Event()
+
+    def paying_out() -> None:
+        try:
+            held = context_class(shared, Account('Frank', Money(0)), Money(5))
+            with held:
+                paying_out_inside.set()
+                paid_into_ran.wait(1)
+                held.run_script()
+        except Exception as exc:  # noqa: BLE001 -- whatever escapes is the measurement
+            failures.append(('out', type(exc).__name__))
+        finally:
+            paying_out_left.set()
+
+    def paid_into() -> None:
+        paying_out_inside.wait(2)
+        try:
+            held = context_class(Account('Grace', Money(1000)), shared, Money(7))
+            with held:
+                held.run_script()
+                paid_into_ran.set()
+                paying_out_left.wait(1)
+        except Exception as exc:  # noqa: BLE001 -- whatever escapes is the measurement
+            failures.append(('in', type(exc).__name__))
+
+    threads = [threading.Thread(target=paying_out), threading.Thread(target=paid_into)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+
+
+@then('the account is left playing a role for good')
+def account_left_playing_a_role(accounts: dict, running: dict) -> None:
+    """Both transfers land, and the account never gets itself back.
+
+    The context that leaves last restores the class it found on the way in,
+    which by then already carried the other context's role. Nothing raises at
+    any point, the balances are right, and the account is left holding
+    `transfer` outside every context -- where the next transfer out of it will
+    stack `SourceAccount` on itself and finally produce the MRO error, in a
+    request that did nothing wrong.
+    """
+    assert running['failures'] == []
+    assert accounts['shared'].balance == Money(1_000_000 - 5 + 7)
+    assert hasattr(accounts['shared'], 'transfer')
+
+
+@then('the account is itself again')
+def account_is_itself_again(accounts: dict, running: dict) -> None:
+    """Both transfers land and the account comes out of them holding nothing."""
+    assert running['failures'] == []
+    assert accounts['shared'].balance == Money(1_000_000 - 5 + 7)
+    assert not hasattr(accounts['shared'], 'transfer')
+    assert type(accounts['shared']) is Account
 
 
 # ---------------------------------------------------------------------------

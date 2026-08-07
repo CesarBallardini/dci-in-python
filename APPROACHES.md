@@ -28,7 +28,8 @@ suite instead of leaving the documentation quietly wrong.
 
 * **`__slots__`** — `__class__` may only be reassigned between classes with the same object layout, and slots change the layout: `TypeError: object layout differs`. The common explanation, that slots remove the object's `__dict__`, is not sufficient: an empty `__slots__ = ()` removes nothing and still makes the reassignment illegal, which is how the declaratively mapped ORM entity is caught without anyone choosing slots. The exact CPython layout rule is confirmed behaviourally, not explained.
 * **Frozen dataclasses** — the same outcome by a different route. A frozen dataclass rejects every `__setattr__`, and `__class__` is an attribute like any other. This is why `Money` is a plain class.
-* **Two live contexts over one object** — `__class__` is state of the *object*, and DCI uses it as though it were state of the *context*. The second context receives `TypeError: cannot create a consistent MRO`. There is a threaded test for it.
+* **Two live contexts over one object, wanting the same role** — `__class__` is state of the *object*, and DCI uses it as though it were state of the *context*. The second context receives `TypeError: cannot create a consistent MRO`. There is a threaded test for it.
+* **Two live contexts over one object, wanting different roles** — the same defect without the error. An account paying one transfer out while a second pays into it needs `SourceAccount` and `DestinationAccount`, which stack into a class with a consistent MRO, so both contexts bind. Each then restores the class it found on the way in, which is correct only while the two nest: two requests that overlap without nesting leave the account playing the first one's role permanently, with nothing raised anywhere. The MRO error is what makes the same-role case survivable, and this case does not have it. Asserted in `tests/unit/test_limits.py`, down to the later transfer that inherits the error.
 * **The synthesized class is not in any source file** — `type(a).__name__` is `Account@SourceAccount`, which no search will find, no IDE will complete, and no type checker can be shown.
 
 ## `TransparentContext` — the synthesized class renamed
@@ -78,6 +79,13 @@ role is not domain state. It answers the unopenable class name as well, and more
 completely than `TransparentContext` does, since there is no synthesized class
 to name.
 
+**It answers the silent leak as well.** `_bind` records the names it wrote and
+`_strip` removes exactly those, so two contexts wanting different roles of one
+account — the case the class binders bind without complaint and then restore
+wrongly — can leave in any order and give the object back holding nothing.
+`test_instance_roles.py::test_two_contexts_wanting_different_roles_give_the_object_back_intact`
+asserts it against the class-bound version of the same overlap.
+
 **Why pickling then fails on load.** Binding puts a bound method in the
 instance dictionary, so `alice.__dict__['transfer']` is `<bound method
 SourceAccount.transfer of Account('Alice', 1000)>`. CPython knows how to pickle
@@ -100,7 +108,10 @@ process later reads the cache, the queue or the session, not in the one that
 serialized a participant mid-use-case; and its traceback names `getattr` and an
 ordinary `Account`, saying nothing about roles or contexts.
 `test_instance_roles.py::test_neither_binder_survives_pickling_but_they_fail_differently`
-asserts both halves.
+asserts both halves, and
+`test_instance_roles.py::test_the_bytes_fail_in_whichever_process_reads_them`
+hands the bytes to a second interpreter, so the process boundary the cost is
+about is crossed rather than described.
 
 **Why a role cannot contribute a special method.** Python resolves dunders on
 the *type*, not on the instance. `a < b` does not look in `a.__dict__`; it goes
@@ -172,32 +183,64 @@ class SerializedMoneyTransferContext(SerializedContext, MoneyTransferContext):
 | `type(obj).__name__` reports | `Account@SourceAccount` | `Account` | `Account@SourceAccount` | `Account` |
 | error messages name | `Account@SourceAccount` | `Account` | `Account@SourceAccount` | `Account` |
 | `pickle` while bound | ❌ refuses | ❌ refuses | ❌ refuses | ⚠️ **fails on load** |
-| two live contexts | ❌ MRO error | ❌ MRO error | ✅ **serialized** \* | ❌ refuses |
+| two live contexts, same role | ❌ MRO error | ❌ MRO error | ✅ **serialized** \* | ❌ refuses |
+| two live contexts, different roles | ❌ **leaks, silently** | ❌ **leaks, silently** | ✅ **serialized** † | ✅ **intact** |
 | a role contributing a dunder | ✅ | ✅ | ✅ | ❌ not possible |
 
 \* **Across threads**, which is the contended case. A single thread that opens two contexts over one object still receives the MRO error, because the lock is an `RLock` and re-entrant to its owner. That is the correct outcome: one thread inside two live contexts over one object is a defect, not contention, so there is nothing to wait for.
+
+† **Across threads** as well, and here the single-thread case is not correct, only unreported. Nothing refuses two different roles, so one thread that opens both contexts is never made to wait and reaches the same leak as `Context`. Both halves are asserted in `tests/unit/test_serialized_roles.py`.
 
 **This table is executable.** `tests/acceptance/features/role_binders.feature`
 contains every cell as an example row, so a Python release that changes one
 answer fails exactly that row.
 
-Two rows need explanation.
+Three rows need explanation.
 
-**Two live contexts.** The three class binders write to state belonging to the
-*object* — its class — so any per-object mechanism inherits the problem.
-`SerializedContext` does not avoid it; it prevents two contexts from holding the
-object at the same time, which is a different thing and the only approach that
-works. `InstanceContext` refuses instead: `_bind` will not write over a name the
-object already has, so the second context raises `RuntimeError` where the class
-binders raise an MRO error. Three of the four therefore fail at the scene and in
-the context that caused it, and only the locking one lets both transfers
-complete.
+**Two live contexts, same role.** The three class binders write to state
+belonging to the *object* — its class — so any per-object mechanism inherits the
+problem. `SerializedContext` does not avoid it; it prevents two contexts from
+holding the object at the same time, which is a different thing and the only
+approach that works. `InstanceContext` refuses instead: `_bind` will not write
+over a name the object already has, so the second context raises `RuntimeError`
+where the class binders raise an MRO error. Three of the four therefore fail at
+the scene and in the context that caused it, and only the locking one lets both
+transfers complete.
 
 The row measures *threads*, which is the contended case. One thread opening two
 contexts over one object is a defect rather than contention, and all four refuse
 it — `SerializedContext` included, since its `RLock` is re-entrant to the thread
 already holding it. Both situations are example rows in `role_binders.feature`,
 under *Two transfers out of one account* opened by one thread and served by two.
+
+**Two live contexts, different roles.** The worse case, and the one an MRO error
+gives no warning of. `SourceAccount` and `DestinationAccount` stack into a class
+with a consistent MRO, so under the class binders both contexts bind. What is
+wrong is what each context puts back: the class it found on the way in. Two
+requests that overlap without nesting — the first to open is the first to close
+— therefore leave the account playing `SourceAccount` outside every context, and
+the next transfer out of it stacks that role on itself and fails with the MRO
+error of the row above, arbitrarily later and in a request that did nothing
+wrong.
+
+Which of the two overlapping transfers pays for it depends on where the first
+exit falls. If both have run their scripts by then, both complete with correct
+balances and the leak is all that is left. If the second is still mid-script,
+the first exit takes `DestinationAccount` away from underneath it and that
+transfer dies on a missing `receive`, with nothing in the message about roles,
+contexts or the other request.
+`tests/unit/test_limits.py` asserts both timings, the second one across two
+threads because a single thread reaches a `LookupError` on the popped
+`ContextVar` before it can get that far.
+
+`InstanceContext` is unaffected, because `_bind` records the names it wrote and
+`_strip` removes exactly those: the order the two contexts leave in cannot
+matter. `SerializedContext` closes it the way it closes the row above, by
+keeping the two from overlapping at all, and with the same qualification —
+across threads, not within one.
+
+The `role_binders.feature` scenario is *One account paying a transfer out while
+another pays into it*.
 
 **Pickle.** No binder survives a round trip. They differ in *when* the attempt
 fails. `Context` raises at `dumps`, in the process that serialized a

@@ -60,6 +60,13 @@ class SerializedContext(Context):
     use case at a time -- the same behaviour a `SELECT ... FOR UPDATE` gives.
     Participants that share nothing never interact and run fully in parallel.
 
+    Nor does it apply within one thread, and that boundary is wider than it
+    looks. Two contexts wanting the same role are refused by the MRO error
+    before the lock is consulted, which is the correct outcome for a defect in
+    the calling code. Two wanting *different* roles are refused by nothing at
+    all: the roles stack, the `RLock` is re-entrant to its owner, and one thread
+    holding both contexts reaches the same silent leak `Context` has.
+
     Nothing here applies across processes, and nothing needs to: separate
     processes have separate objects. `tests/unit/test_serialized_roles.py`
     measures each of these properties.
