@@ -28,6 +28,14 @@ repos:
         language: system
         types: [python]
 
+      # Notebooks are committed without outputs, so a diff shows only source
+      # changes and no output claims anything a fresh run has not produced.
+      - id: nbstripout
+        name: nbstripout
+        entry: uv run --frozen nbstripout
+        language: system
+        types: [jupyter]
+
       - id: uv-lock-check
         name: uv lock --check
         description: fail if uv.lock is out of sync with pyproject.toml

@@ -94,7 +94,7 @@ gives up object identity in exchange.
 
 from __future__ import annotations
 
-from banking.dci.base import BaseContext, context
+from banking.dci.base import BaseContext, context, playing
 from banking.dci.class_binding import Context
 from banking.dci.instance import InstanceContext
 from banking.dci.serialized import SerializedContext
@@ -108,4 +108,5 @@ __all__ = [
     'SerializedContext',
     'TransparentContext',
     'context',
+    'playing',
 ]

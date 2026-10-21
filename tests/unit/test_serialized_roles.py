@@ -45,6 +45,7 @@ def transferring(source: Account, destination: Account, amount: int) -> threadin
 
 
 @pytest.mark.unit
+@pytest.mark.threads
 def test_the_collision_is_gone_under_threads() -> None:
     """The scenario `test_limits.py` fails on, run against the locking binder.
 
@@ -76,6 +77,7 @@ def test_the_collision_is_gone_under_threads() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.threads
 def test_it_also_closes_the_lost_update_that_was_never_about_dci() -> None:
     """The race underneath the race, and the reason the lock is not a DCI tax.
 
@@ -95,6 +97,7 @@ def test_it_also_closes_the_lost_update_that_was_never_about_dci() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.threads
 def test_transfers_that_share_nothing_still_run_in_parallel() -> None:
     """It locks participants, not the world.
 
@@ -122,6 +125,7 @@ def test_transfers_that_share_nothing_still_run_in_parallel() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.threads
 def test_opposite_directions_do_not_deadlock() -> None:
     """The bug the fixed lock order exists to rule out.
 
@@ -153,6 +157,7 @@ def test_opposite_directions_do_not_deadlock() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.threads
 def test_it_also_closes_the_overlap_that_reports_no_error_at_all() -> None:
     """The leak of `test_limits.py`, run against the locking binder.
 
@@ -208,6 +213,7 @@ def test_it_also_closes_the_overlap_that_reports_no_error_at_all() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.threads
 def test_one_thread_reaches_the_leak_through_the_locking_binder_too() -> None:
     """The boundary of what the lock covers, and it is wider than the MRO error.
 

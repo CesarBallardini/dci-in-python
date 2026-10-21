@@ -16,8 +16,8 @@ What is kept:
 * **A role reaches its peers through `TransferRoles`, never directly.** No role
   holds a reference to another participant's data object.
 * **The script is in one place**, and the role bodies are nearly identical to
-  the DCI ones. The forwarding properties exist so that a role can still write
-  `self.balance` and `self.debit(...)`.
+  the DCI ones. The forwarding properties exist so that `TransferAmountRole`
+  can ask a role for `balance` and `debit(...)` as though it were the account.
 * **The data objects are unchanged.** `Account` learns nothing: the roles
   require `banking.data.account.AccountLike`, the same structural protocol the
   DCI version uses.

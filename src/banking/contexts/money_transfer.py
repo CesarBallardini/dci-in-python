@@ -8,12 +8,14 @@ knowledge of which mechanism attached them.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 
-from banking.dci import Context, InstanceContext, SerializedContext, TransparentContext
-from banking.roles.money_transfer import DestinationAccount, SourceAccount, TransferAmount
+from banking.dci import Context, InstanceContext, SerializedContext, TransparentContext, playing
+from banking.roles.money_transfer import DestinationAccount, SourceAccount, SourceAccountPlayer, TransferAmount
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from banking.data.account import AccountLike
     from banking.data.money import Money
 
@@ -28,7 +30,7 @@ class MoneyTransferContext(Context):
     them.
     """
 
-    roles: ClassVar[dict[str, type]] = {
+    roles: ClassVar[Mapping[str, type]] = {
         'source': SourceAccount,
         'destination': DestinationAccount,
         'amount': TransferAmount,
@@ -53,13 +55,13 @@ class MoneyTransferContext(Context):
         -- a test holding the roles open across a thread switch, for example --
         can run the script without re-entering.
 
-        The `cast` records a runtime fact in one place. Inside the `with`,
+        `playing` records a runtime fact in one place. Inside the `with`,
         `self.source` is an `Account@SourceAccount` and does have
         `.transfer()`, but that class is built at runtime, exists in no source
         file, and cannot be shown to a type checker. This is an assertion, not
         a suppressed diagnostic.
         """
-        cast('SourceAccount', self.source).transfer()
+        playing(self.source, SourceAccountPlayer).transfer()
 
     def execute(self) -> None:
         """Run the use case: the source transfers."""
@@ -108,7 +110,7 @@ class InstanceMoneyTransferContext(InstanceContext):
     of the mechanism binding them.
     """
 
-    roles: ClassVar[dict[str, type]] = dict(MoneyTransferContext.roles)
+    roles: ClassVar[Mapping[str, type]] = dict(MoneyTransferContext.roles)
 
     def __init__(self, source: AccountLike, destination: AccountLike, amount: Money) -> None:
         """Cast `source`, `destination` and `amount` for one transfer."""
@@ -119,12 +121,12 @@ class InstanceMoneyTransferContext(InstanceContext):
     def run_script(self) -> None:
         """Run the interaction, with the roles assumed already bound.
 
-        The `cast` is present for a related reason. There is no runtime-built
+        `playing` is present for a related reason. There is no runtime-built
         class here, but `self.source` is typed as an `AccountLike` and only
         acquires `.transfer()` inside the `with`. A type checker cannot see a
         method written in through `object.__setattr__`.
         """
-        cast('SourceAccount', self.source).transfer()
+        playing(self.source, SourceAccountPlayer).transfer()
 
     def execute(self) -> None:
         """Run the use case: the source transfers."""

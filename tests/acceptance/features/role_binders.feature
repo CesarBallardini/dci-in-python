@@ -56,6 +56,7 @@ Feature: Four ways to lend a role, and what each one costs
       | serialized  | is refused with an MRO error      |
       | instance    | is refused as the name is taken   |
 
+  @threads
   Scenario Outline: Two transfers out of one account, served by two threads
     Given a shared account with 1000000 ARS
     When two threads run overlapping transfers out of it with the <binder> binder
@@ -74,6 +75,7 @@ Feature: Four ways to lend a role, and what each one costs
       | binder   | result                                    |
       | instance | the thread that arrived second is refused |
 
+  @threads
   Scenario Outline: One account paying a transfer out while another pays into it
     Given a shared account with 1000000 ARS
     When two threads run a transfer out of it and a transfer into it with the <binder> binder

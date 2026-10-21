@@ -2,16 +2,20 @@
 
 `SourceAccount` is worth reading closely, because the whole idea is in those
 few lines. It inherits from nothing and is never instantiated. It uses
-`self.balance` and `self.debit()` without defining either. It is a class
-written to be attached to another object for the duration of a context.
+`self.holder` without defining it, and `TransferAmount` asks the account for
+`balance`, `debit()` and `credit()` without knowing what an account is. They
+are classes written to be attached to another object for the duration of a
+context.
 
 What a role knows and does not know is the point. It has no knowledge of
 which class will play it, but it does require a protocol from that class:
-`balance` and `debit()`. That implicit contract is all the role demands, and
-it is the property Reenskaug wanted from Simula in 1970 and did not get --
-components that communicate through a standard protocol and are opaque
-internally. To reach its peers, a role asks the context rather than holding a
-reference: a role knows the other *role*, not the object playing it.
+`holder`, `balance`, `debit()`, `credit()`. That contract is all the role
+demands, and it is the property Reenskaug wanted from Simula in 1970 and did
+not get -- components that communicate through a standard protocol and are
+opaque internally. It is written down as the type of each role's `self`:
+`AccountLike` for the two accounts, and for the amount a type variable bound
+to `MoneyLike`. To reach its peers, a role asks the context rather than
+holding a reference: a role knows the other *role*, not the object playing it.
 
 `TransferAmount` is the third role. The Artima paper's example uses two, but
 the architecture chapter notes that "one possible mental model has three
@@ -26,9 +30,10 @@ source, the destination, and the amount.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol
 
-from banking.data.account import InsufficientFundsError
+from banking.data.account import AccountLike, InsufficientFundsError
+from banking.data.money import MoneyLike
 from banking.dci import context
 
 if TYPE_CHECKING:
@@ -38,24 +43,17 @@ if TYPE_CHECKING:
 class SourceAccount:
     """Role played by the account the money leaves from."""
 
-    if TYPE_CHECKING:
-        # The implicit protocol this role requires of whatever object plays it.
-        # None of it exists at runtime: the synthesized `Account@SourceAccount`
-        # resolves `balance` and `debit` on the data class in the mix. It is
-        # written down because a type checker cannot otherwise read a role, and
-        # stating the contract is preferable to suppressing the errors.
-        balance: Money
-        holder: str
-
-        def debit(self, amount: Money) -> None:
-            """Supplied by the data object playing this role."""
-
-    def transfer(self) -> None:
+    def transfer(self: AccountLike) -> None:
         """The script, in the order the user would describe it.
 
         Note the absence of parameters. The amount is not an argument passed
         between functions; it is a participant with a part of its own, and the
         source reaches it the same way it reaches the destination.
+
+        `self` is annotated with what the role requires of its player rather
+        than left as `SourceAccount`, because at runtime it is never a
+        `SourceAccount`: it is an `Account@SourceAccount`, or an `Account` with
+        the method written into its `__dict__`.
 
         Raises:
             InsufficientFundsError: if the balance does not cover the amount.
@@ -70,12 +68,7 @@ class SourceAccount:
 class DestinationAccount:
     """Role played by the account the money arrives at."""
 
-    if TYPE_CHECKING:
-
-        def credit(self, amount: Money) -> None:
-            """Supplied by the data object playing this role."""
-
-    def receive(self) -> None:
+    def receive(self: AccountLike) -> None:
         """Take in whatever the transfer is moving."""
         context(_RunningTransfer).amount.deposit_into(self)
 
@@ -86,32 +79,64 @@ class TransferAmount:
     This role, not `Account`, is where "can this much leave that balance" is
     decided. Whether a balance may go below zero is a property of this use
     case, not of either account.
+
+    `self` is a type variable rather than `Money`: both type checkers reject
+    `self: Money`, because `Money` is not a supertype of `TransferAmount`, and
+    accept a type variable bound to a protocol. Binding it to the account's own
+    type parameter is what says "an account holding amounts like this one", and
+    it is why no `cast` is needed to hand `self` to `debit` and `credit`.
     """
 
-    if TYPE_CHECKING:
-        amount: int
-        currency: str
-
-    def as_money(self) -> Money:
-        """`self`, viewed as the data object playing this role.
-
-        The single place where this role states that a type checker cannot be
-        shown a class built at runtime. Every method below goes through it, so
-        the cast is made once and named rather than repeated.
-        """
-        return cast('Money', self)
-
-    def available_in(self, account: SourceAccount) -> bool:
+    def available_in[M: MoneyLike](self: M, account: AccountLike[M]) -> bool:
         """Whether `account` holds at least this much."""
-        return account.balance >= self.as_money()
+        return account.balance >= self
 
-    def withdraw_from(self, account: SourceAccount) -> None:
+    def withdraw_from[M: MoneyLike](self: M, account: AccountLike[M]) -> None:
         """Leave `account`."""
-        account.debit(self.as_money())
+        account.debit(self)
 
-    def deposit_into(self, account: DestinationAccount) -> None:
+    def deposit_into[M: MoneyLike](self: M, account: AccountLike[M]) -> None:
         """Arrive at `account`."""
-        account.credit(self.as_money())
+        account.credit(self)
+
+
+# What each participant looks like while it plays its part: the data object's
+# protocol and the role's methods together. Python has no intersection type,
+# so "an `AccountLike` that is also a `SourceAccount`" is written out by hand.
+# These are what a role sees of its peers, and what a context sees of a
+# participant once `__enter__` has bound it.
+
+
+class SourceAccountPlayer(AccountLike, Protocol):
+    """An account while it plays `SourceAccount`."""
+
+    def transfer(self) -> None:
+        """See `SourceAccount.transfer`."""
+        ...
+
+
+class DestinationAccountPlayer(AccountLike, Protocol):
+    """An account while it plays `DestinationAccount`."""
+
+    def receive(self) -> None:
+        """See `DestinationAccount.receive`."""
+        ...
+
+
+class TransferAmountPlayer(MoneyLike, Protocol):
+    """An amount while it plays `TransferAmount`."""
+
+    def available_in(self, account: AccountLike[Money], /) -> bool:
+        """See `TransferAmount.available_in`."""
+        ...
+
+    def withdraw_from(self, account: AccountLike[Money], /) -> None:
+        """See `TransferAmount.withdraw_from`."""
+        ...
+
+    def deposit_into(self, account: AccountLike[Money], /) -> None:
+        """See `TransferAmount.deposit_into`."""
+        ...
 
 
 class _RunningTransfer(Protocol):
@@ -121,11 +146,12 @@ class _RunningTransfer(Protocol):
     so that the dependency points the intended way: a context knows its roles,
     a role does not know its contexts.
 
-    It exists at runtime, unlike the protocols the roles declare above, because
-    it is passed to `context()` as a value: `context(_RunningTransfer)` is what
-    types a role's peers without a `cast`.
+    The participants are typed as players, not as roles: a role's peer is an
+    account or an amount *playing* a part, so it has both the data object's
+    protocol and the role's methods. `context(_RunningTransfer)` is what types
+    them without a `cast`.
     """
 
-    source: SourceAccount
-    destination: DestinationAccount
-    amount: TransferAmount
+    source: SourceAccountPlayer
+    destination: DestinationAccountPlayer
+    amount: TransferAmountPlayer

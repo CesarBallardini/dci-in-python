@@ -34,6 +34,10 @@ max-complexity = 15
 # The demo is a script meant to be read top to bottom next to the post:
 # module-level statements, prints, and no per-section docstrings.
 "demo/**" = ["D", "T201"]
+# The notebooks are the demo split into cells, read the same way. They also
+# call `pickle.loads` on bytes they produced a line earlier, because the load
+# failing is the measurement.
+"notebooks/**" = ["D", "S301"]
 
 [format]
 quote-style = "single"

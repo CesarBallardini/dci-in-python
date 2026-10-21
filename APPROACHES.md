@@ -239,6 +239,20 @@ matter. `SerializedContext` closes it the way it closes the row above, by
 keeping the two from overlapping at all, and with the same qualification —
 across threads, not within one.
 
+**Tasks on one event loop count as one thread.** Both overlaps need two contexts
+live over one object, not two threads. Two asyncio tasks that each hold a
+context across an `await` produce them on a single thread, which is how an
+asynchronous server reaches them. Each task gets its own copy of the
+`ContextVar` state, so `context()` resolves per task, while the class of the
+shared account is still state of the object. `Context`, `TransparentContext`
+and `InstanceContext` therefore give the answers in the table. The two
+`SerializedContext` cells do not hold: its `RLock` belongs to the thread, every
+task runs on that thread, and the second task re-enters the lock the first one
+holds. Under tasks it raises the MRO error for the same role and leaks for
+different roles, as `Context` does. Serializing tasks would need a lock the
+event loop knows about, acquired across an `await`, and none of the four
+binders has one. `tests/unit/test_async_overlap.py` asserts all of this.
+
 The `role_binders.feature` scenario is *One account paying a transfer out while
 another pays into it*.
 
@@ -390,8 +404,9 @@ It keeps almost everything DCI provides. The use case is still an object
 `TransferAmountRole` included, so the third role survives. A role still reaches
 its peers through the roles object rather than holding another participant's
 data. The script is still in one place, and the role bodies are nearly
-identical to the DCI ones, because narrow forwarding properties let a role
-write `self.balance` and `self.debit(...)`. `Account` is unchanged.
+identical to the DCI ones, because narrow forwarding properties let
+`TransferAmountRole` ask a role for `balance` and `debit(...)` as though it were
+the account. `Account` is unchanged.
 
 One thing is given up: the data object never becomes the role, so
 `isinstance(role, Account)` is `False`. That is the same identity loss as the

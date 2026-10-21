@@ -3,6 +3,7 @@
 [![check](https://github.com/CesarBallardini/dci-in-python/actions/workflows/check.yml/badge.svg)](https://github.com/CesarBallardini/dci-in-python/actions/workflows/check.yml)
 [![pytest](https://github.com/CesarBallardini/dci-in-python/actions/workflows/pytest.yml/badge.svg)](https://github.com/CesarBallardini/dci-in-python/actions/workflows/pytest.yml)
 [![security](https://github.com/CesarBallardini/dci-in-python/actions/workflows/security.yml/badge.svg)](https://github.com/CesarBallardini/dci-in-python/actions/workflows/security.yml)
+[![lite](https://github.com/CesarBallardini/dci-in-python/actions/workflows/lite.yml/badge.svg)](https://github.com/CesarBallardini/dci-in-python/actions/workflows/lite.yml)
 
 DCI — *Data, Context, Interaction* — implemented in Python from scratch with no dependencies: roles attached to live objects for the duration of a context, in about thirty lines of standard library.
 
@@ -19,6 +20,8 @@ make demo
 make test
 ```
 
+The same code also runs in the browser, on CPython 3.14 compiled to WebAssembly, with nothing installed: [the notebooks](https://cesarballardini.github.io/dci-in-python/) walk through the demo and run the test suite. The first load downloads the Python runtime and takes a while.
+
 Every task goes through the Makefile. `make` with no target prints this list:
 
 | Target | What it does |
@@ -33,13 +36,18 @@ Every task goes through the Makefile. `make` with no target prints this list:
 | `make test-integration` | Only the integration tests: real SQLite database and SQLAlchemy |
 | `make security` | bandit (SAST), pip-audit and OSV-Scanner (SCA) |
 | `make precommit` | Run every pre-commit hook against every file |
+| `make notebooks` | Run every notebook on desktop CPython, without saving outputs |
+| `make lite` | Build the browser site into `_site/`: the `banking` wheel, the notebooks and the test suite |
+| `make lite-serve` | Build the browser site and serve it on `http://localhost:8000` |
+| `make test-pyodide` | Run every notebook under Pyodide in Node, as the browser kernel would (needs Node.js 24) |
+| `make test-e2e` | Run every notebook of the built site in Chromium and Firefox (Playwright) |
 | `make build` | `lint types test`, then build the sdist and the wheel into `dist/` |
 | `make clean` | Remove build artifacts, caches and coverage output; keeps `.venv` |
 | `make help` | The same list, from the Makefile |
 
 Two companion documents keep this one focused on the findings:
 
-* **[TOOLING.md](TOOLING.md)** — prerequisites, what each tool is for, CI, updating dependencies, building a wheel.
+* **[TOOLING.md](TOOLING.md)** — prerequisites, what each tool is for, CI, running in the browser, updating dependencies, building a wheel.
 * **[APPROACHES.md](APPROACHES.md)** — the same transfer implemented every way it can be: the four role binders and the five designs, with both comparison tables.
 
 # The transfer, and the mechanism
@@ -101,8 +109,17 @@ src/banking/
     role_as_wrapper.py        # the role as a wrapper: no binding, and no identity
 demo/
   dci_demo.py                 # the transfer, the four breakages, and the five styles
+notebooks/                    # the same material, run in the browser
+  01-the-mechanism.ipynb      # roles bound, temporary, and identity kept
+  02-four-binders.ipynb       # the four binders, pickle, and a role that contributes a dunder
+  03-where-python-says-no.ipynb  # the breakages, and the overlap reproduced with asyncio tasks
+  04-five-designs.ipynb       # the five styles, and which domain objects can play a role
+  05-run-the-tests.ipynb      # the test suite, run by pytest in the notebook
+lite/
+  jupyter_lite_config.json    # the JupyterLite site build
+  pyodide/                    # run_notebooks.mjs: every notebook under Pyodide in Node
 tests/
-  conftest.py                 # the alice and bob fixtures every test builds on
+  conftest.py                 # the alice and bob fixtures, and the capability skips
   unit/                       # no infrastructure, fast
     test_money_transfer.py    # the money moves
     test_roles.py             # roles are temporary, contextual, identity-preserving
@@ -112,6 +129,7 @@ tests/
     test_serialized_roles.py  # the locks: four measured properties
     test_instance_roles.py    # instance binding: what it gains and what it costs
     test_money_transfer_service.py  # the service, and the limits it does not have
+    test_async_overlap.py     # the overlapping contexts, served by two asyncio tasks
     test_fat_account.py       # the money moves, and the entity has absorbed the use case
     test_anemic_service.py    # the money moves, and no role exists as an object
     test_role_as_wrapper.py   # the wrapper: what it survives, and what it costs
@@ -123,6 +141,8 @@ tests/
       role_binding.feature    # which domain objects can play a role, row by row
       role_binders.feature    # the four binders compared, cell by cell
     steps/                    # one pytest-bdd step module per feature
+  e2e/
+    test_notebooks_in_browser.py  # every notebook of the built site, run in two browsers
 ```
 
 # Every way of writing it

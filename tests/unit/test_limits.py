@@ -11,7 +11,7 @@ import contextvars
 import threading
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
 import attrs
 import pytest
@@ -19,10 +19,11 @@ import pytest
 from banking.contexts.money_transfer import MoneyTransferContext
 from banking.data.account import Account
 from banking.data.money import Money
-from banking.dci import context
+from banking.dci import Context, context
+from banking.roles.money_transfer import TransferAmount
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
 
 def in_a_fresh_context[Result](work: Callable[[], Result]) -> Result:
@@ -33,6 +34,13 @@ def in_a_fresh_context[Result](work: Callable[[], Result]) -> Result:
     own copy of that state, so the leftover cannot reach the tests that follow.
     """
     return contextvars.copy_context().run(work)
+
+
+class FailureDto(NamedTuple):
+    """A thread that did not finish: which one, and the name of what it raised."""
+
+    thread: str
+    exception_name: str
 
 
 class SlottedAccount:
@@ -92,9 +100,8 @@ def test_a_frozen_dataclass_cannot_play_a_role(alice: Account, bob: Account) -> 
     """The same outcome as `__slots__`, reached by the idiomatic spelling.
 
     A frozen dataclass overrides `__setattr__` to reject every assignment,
-    and `__class__` is an attribute like any other. The standard way to write
-    `Money`, and any other value object, is therefore the one form that
-    cannot take the `TransferAmount` part.
+    and `__class__` is an attribute like any other. The value-object case is
+    `test_a_frozen_value_object_cannot_play_the_amount`, below.
     """
     ctx = MoneyTransferContext(FrozenAccount('Alice', Money(1000)), FrozenAccount('Bob', Money(0)), Money(250))
 
@@ -102,6 +109,35 @@ def test_a_frozen_dataclass_cannot_play_a_role(alice: Account, bob: Account) -> 
     # `__class__` itself: the freeze applies to role binding as well.
     with pytest.raises(Exception, match="cannot assign to field '__class__'"):
         ctx.execute()
+
+
+@dataclass(frozen=True)
+class FrozenMoney:
+    """`Money` written the idiomatic way, as a frozen dataclass."""
+
+    amount: int
+    currency: str = 'ARS'
+
+
+class AmountOnlyContext(Context):
+    """Only the third role, so the amount is the one participant being bound.
+
+    `MoneyTransferContext` is declared over `Money`, and a whole transfer would
+    need a frozen `Money` everywhere, account balances included. Binding is
+    where the frozen form fails, so binding is all this needs.
+    """
+
+    roles: ClassVar[Mapping[str, type]] = {'amount': TransferAmount}
+
+    def __init__(self, amount: FrozenMoney) -> None:
+        self.amount = amount
+
+
+@pytest.mark.unit
+def test_a_frozen_value_object_cannot_play_the_amount() -> None:
+    """The standard way to write `Money` is the one form that cannot take the `TransferAmount` part."""
+    with pytest.raises(Exception, match="cannot assign to field '__class__'"), AmountOnlyContext(FrozenMoney(250)):
+        pass
 
 
 @pytest.mark.unit
@@ -251,6 +287,7 @@ def test_the_left_over_role_breaks_the_next_transfer_out_of_that_account() -> No
 
 
 @pytest.mark.unit
+@pytest.mark.threads
 def test_the_first_context_to_leave_strips_the_role_from_the_one_still_inside() -> None:
     """The other half of the overlap, and it lands on a transfer in flight.
 
@@ -334,6 +371,7 @@ def test_the_overlapping_exit_also_leaves_a_finished_context_installed() -> None
 
 
 @pytest.mark.unit
+@pytest.mark.threads
 def test_the_collision_happens_with_real_threads() -> None:
     """The same failure, served by two concurrent requests.
 
@@ -345,7 +383,7 @@ def test_the_collision_happens_with_real_threads() -> None:
     that moves the money.
     """
     shared = Account('Erin', Money(1_000_000))
-    failures: list[tuple[str, str]] = []
+    failures: list[FailureDto] = []
     moved: list[Money] = []
     role_bound = threading.Event()
 
@@ -359,14 +397,14 @@ def test_the_collision_happens_with_real_threads() -> None:
                 ctx.run_script()
             moved.append(destination.balance)
         except (TypeError, RuntimeError) as exc:
-            failures.append(('slow', type(exc).__name__))
+            failures.append(FailureDto('slow', type(exc).__name__))
 
     def fast_thread() -> None:
         role_bound.wait(2)
         try:
             MoneyTransferContext(shared, Account('Grace', Money(0)), Money(7)).execute()
         except (TypeError, RuntimeError) as exc:
-            failures.append(('fast', type(exc).__name__))
+            failures.append(FailureDto('fast', type(exc).__name__))
 
     threads = [threading.Thread(target=slow_thread), threading.Thread(target=fast_thread)]
     for thread in threads:

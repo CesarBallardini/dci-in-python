@@ -11,3 +11,9 @@ coverage.xml
 dist/
 build/
 *.egg-info/
+_site/
+lite/pypi/
+lite/contents/
+lite/.jupyterlite.doit.db
+lite/.cache/
+lite/pyodide/node_modules/

@@ -159,6 +159,7 @@ def test_and_dci_refuses_those_same_three(style: type, message: str) -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.threads
 def test_two_concurrent_transfers_over_one_account_both_succeed() -> None:
     """Exactly the scenario that breaks DCI, and here it is uneventful.
 

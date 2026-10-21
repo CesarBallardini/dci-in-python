@@ -14,7 +14,8 @@ import pickle
 import threading
 import time
 import types
-from typing import TYPE_CHECKING, Any, ClassVar
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
 import pytest
 from pytest_bdd import given, parsers, scenarios, then, when
@@ -27,10 +28,10 @@ from banking.contexts.money_transfer import (
 )
 from banking.data.account import Account
 from banking.data.money import Money
-from banking.dci import Context, InstanceContext, context
+from banking.dci import BaseContext, Context, InstanceContext, context
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
     from typing import Protocol, Self
 
     from banking.data.account import AccountLike
@@ -109,6 +110,10 @@ class SlottedAccount:
         self.balance = self.balance + amount
 
 
+# The participants, by holder name: the plain ones and the one no binder can bind to.
+type AccountsByHolder = dict[str, Account | SlottedAccount]
+
+
 class ComparableAmount:
     """A role that would make the object playing it comparable."""
 
@@ -120,7 +125,7 @@ class ComparableAmount:
 class ComparingContext(Context):
     """One participant, one role, bound on the class."""
 
-    roles: ClassVar[dict[str, type]] = {'amount': ComparableAmount}
+    roles: ClassVar[Mapping[str, type]] = {'amount': ComparableAmount}
 
     def __init__(self, amount: Money) -> None:
         self.amount = amount
@@ -129,7 +134,7 @@ class ComparingContext(Context):
 class ComparingInstanceContext(InstanceContext):
     """The same, bound on the instance."""
 
-    roles: ClassVar[dict[str, type]] = {'amount': ComparableAmount}
+    roles: ClassVar[Mapping[str, type]] = {'amount': ComparableAmount}
 
     def __init__(self, amount: Money) -> None:
         self.amount = amount
@@ -138,20 +143,50 @@ class ComparingInstanceContext(InstanceContext):
 COMPARING: dict[str, AmountBinder] = {'class': ComparingContext, 'instance': ComparingInstanceContext}
 
 
+class FailureDto(NamedTuple):
+    """A thread that did not finish: which one, and the name of what it raised."""
+
+    thread: str
+    exception_name: str
+
+
+@dataclass
+class RunningDto:
+    """State passed from the `When` steps to the `Then` steps.
+
+    Everything starts empty: each scenario fills in only what its own steps
+    use. `binder` is kept so a second context can be built with the same one
+    as the first, without asking a protocol-typed value for its `type()`.
+    """
+
+    context: RunningRole | None = None
+    binder: TransferBinder | None = None
+    error: Exception | None = None
+    blob: bytes | None = None
+    failures: list[FailureDto] = field(default_factory=list)
+    amount: Money | None = None
+    destination: Account | SlottedAccount | None = None
+
+    def opened(self) -> RunningRole:
+        """The context a `When` step left open for the `Then` steps to close."""
+        assert self.context is not None, 'no step opened a context'
+        return self.context
+
+
 @pytest.fixture
-def accounts() -> dict[str, Any]:
+def accounts() -> AccountsByHolder:
     """The participants, by holder name."""
     return {}
 
 
 @pytest.fixture
-def running() -> dict[str, Any]:
+def running() -> RunningDto:
     """State passed from the `When` steps to the `Then` steps."""
-    return {'context': None, 'error': None, 'blob': None, 'failures': [], 'amount': None}
+    return RunningDto()
 
 
 @pytest.fixture(autouse=True)
-def close_anything_left_open(running: dict) -> Iterator[None]:
+def close_anything_left_open(running: RunningDto) -> Iterator[None]:
     """Close any context the scenario left open.
 
     Several scenarios open a context in a `When` step and inspect the
@@ -162,25 +197,26 @@ def close_anything_left_open(running: dict) -> Iterator[None]:
     scenario from causing others to fail.
     """
     yield
-    opened = running.get('context')
-    if opened is not None and opened._active:  # noqa: SLF001 -- reading the flag this net is about
+    # `_active` is `BaseContext`'s own flag, so that is the type asked for here.
+    opened = running.context
+    if isinstance(opened, BaseContext) and opened._active:  # noqa: SLF001 -- reading the flag this net is about
         opened.__exit__()
 
 
 @given(parsers.parse('an account "{holder}" with {amount:d} {currency}'))
-def an_account(accounts: dict, holder: str, amount: int, currency: str) -> None:
+def an_account(accounts: AccountsByHolder, holder: str, amount: int, currency: str) -> None:
     """A plain domain object, which is the only kind all four binders accept."""
     accounts[holder] = Account(holder, Money(amount, currency))
 
 
 @given(parsers.parse('a shared account with {amount:d} {currency}'))
-def a_shared_account(accounts: dict, amount: int, currency: str) -> None:
+def a_shared_account(accounts: AccountsByHolder, amount: int, currency: str) -> None:
     """The account two concurrent requests both want."""
     accounts['shared'] = Account('Erin', Money(amount, currency))
 
 
 @given('a source that cannot play a role')
-def a_source_that_cannot(accounts: dict) -> None:
+def a_source_that_cannot(accounts: AccountsByHolder) -> None:
     """Slotted, so binding fails after other participants are already bound."""
     accounts['Alice'] = SlottedAccount('Alice', Money(1000))
 
@@ -191,39 +227,39 @@ def a_source_that_cannot(accounts: dict) -> None:
 
 
 @when(parsers.parse('a transfer is opened with the {binder} binder'))
-def open_a_transfer(accounts: dict, running: dict, binder: str) -> None:
+def open_a_transfer(accounts: AccountsByHolder, running: RunningDto, binder: str) -> None:
     """Enter the context and leave it open, so the `Then` steps see it bound."""
     opened = BINDERS[binder](accounts['Alice'], accounts['Bob'], Money(10))
     opened.__enter__()
-    running['context'] = opened
+    running.context = opened
 
 
 @when(parsers.parse('the same context is entered a second time'))
-def enter_again(running: dict) -> None:
+def enter_again(running: RunningDto) -> None:
     """A running use case is not a nesting construct."""
     try:
-        running['context'].__enter__()
+        running.opened().__enter__()
     except RuntimeError as exc:
-        running['error'] = exc
+        running.error = exc
 
 
 @when(parsers.parse('"{holder}" is pickled'))
-def is_pickled(accounts: dict, running: dict, holder: str) -> None:
+def is_pickled(accounts: AccountsByHolder, running: RunningDto, holder: str) -> None:
     """Serializing a participant mid-use-case is a defect; the question is when it is reported."""
     try:
-        running['blob'] = pickle.dumps(accounts[holder])
+        running.blob = pickle.dumps(accounts[holder])
     except Exception as exc:  # noqa: BLE001 -- which exception is the Then's business
-        running['error'] = exc
+        running.error = exc
 
 
 @then(parsers.parse('the type of "{holder}" reports itself as "{name}"'))
-def type_reports_itself_as(accounts: dict, holder: str, name: str) -> None:
+def type_reports_itself_as(accounts: AccountsByHolder, holder: str, name: str) -> None:
     """What a debugger shows while the role is on."""
     assert type(accounts[holder]).__name__ == name
 
 
 @then(parsers.parse('asking "{holder}" for an undefined attribute blames "{name}"'))
-def attribute_error_blames(accounts: dict, running: dict, holder: str, name: str) -> None:
+def attribute_error_blames(accounts: AccountsByHolder, running: RunningDto, holder: str, name: str) -> None:
     """The message CPython builds from the type name.
 
     CPython builds this message out of the type's `tp_name`, which follows
@@ -235,39 +271,40 @@ def attribute_error_blames(accounts: dict, running: dict, holder: str, name: str
         getattr(accounts[holder], missing)
 
     assert f"'{name}' object has no attribute" in str(caught.value)
-    running['context'].__exit__()
+    running.opened().__exit__()
 
 
 @then('it is refused as not re-entrant')
-def refused_as_not_re_entrant(running: dict) -> None:
+def refused_as_not_re_entrant(running: RunningDto) -> None:
     """And it says so, instead of failing three frames away on a spent token."""
-    assert isinstance(running['error'], RuntimeError)
-    assert 'not re-entrant' in str(running['error'])
-    running['context'].__exit__()
+    assert isinstance(running.error, RuntimeError)
+    assert 'not re-entrant' in str(running.error)
+    running.opened().__exit__()
 
 
 @then('it is refused as it is written')
-def refused_as_written(running: dict) -> None:
+def refused_as_written(running: RunningDto) -> None:
     """`dumps` raises on the spot: the class is in no module, so pickle cannot name it."""
-    assert isinstance(running['error'], pickle.PicklingError)
-    assert running['blob'] is None
-    running['context'].__exit__()
+    assert isinstance(running.error, pickle.PicklingError)
+    assert running.blob is None
+    running.opened().__exit__()
 
 
 @then('it is written and fails on the read')
-def written_and_fails_on_read(running: dict) -> None:
+def written_and_fails_on_read(running: RunningDto) -> None:
     """The worse failure: it moves out of the process that made the mistake.
 
     A bound method pickles as "call `getattr` on this object with this name",
     so `dumps` succeeds and the bytes cannot be loaded -- at load time the
     reconstructed account has no `transfer` for `getattr` to find.
     """
-    assert running['error'] is None
-    assert running['blob'] is not None
-    running['context'].__exit__()
+    blob = running.blob
+    assert running.error is None
+    assert blob is not None
+    running.opened().__exit__()
 
     with pytest.raises(AttributeError, match='transfer'):
-        pickle.loads(running['blob'])  # noqa: S301 -- our own bytes, this test's own process
+        pickle.loads(blob)  # noqa: S301 -- our own bytes, this test's own process
 
 
 # ---------------------------------------------------------------------------
@@ -276,15 +313,16 @@ def written_and_fails_on_read(running: dict) -> None:
 
 
 @when(parsers.parse('a transfer out of it is opened with the {binder} binder'))
-def open_a_transfer_out_of_the_shared_account(accounts: dict, running: dict, binder: str) -> None:
+def open_a_transfer_out_of_the_shared_account(accounts: AccountsByHolder, running: RunningDto, binder: str) -> None:
     """The first context, left open so the second one meets a participant already bound."""
-    opened = BINDERS[binder](accounts['shared'], Account('Frank', Money(0)), Money(5))
+    running.binder = BINDERS[binder]
+    opened = running.binder(accounts['shared'], Account('Frank', Money(0)), Money(5))
     opened.__enter__()
-    running['context'] = opened
+    running.context = opened
 
 
 @when('a second transfer out of it is opened with the same binder')
-def open_a_second_transfer_out_of_the_shared_account(accounts: dict, running: dict) -> None:
+def open_a_second_transfer_out_of_the_shared_account(accounts: AccountsByHolder, running: RunningDto) -> None:
     """One thread, two live contexts over one account: a defect, not contention.
 
     Nothing here is waiting for anything, so `SerializedContext` has nothing to
@@ -292,29 +330,31 @@ def open_a_second_transfer_out_of_the_shared_account(accounts: dict, running: di
     and the second `__enter__` walks straight through to the same collision the
     other class binders get.
     """
-    second = type(running['context'])(accounts['shared'], Account('Grace', Money(0)), Money(7))
+    binder = running.binder
+    assert binder is not None, 'no step opened the first transfer'
+    second = binder(accounts['shared'], Account('Grace', Money(0)), Money(7))
     try:
         second.__enter__()
     except Exception as exc:  # noqa: BLE001 -- the refusal is the measurement
-        running['error'] = exc
+        running.error = exc
 
 
 @then('the second one is refused with an MRO error')
-def second_refused_with_mro_error(running: dict) -> None:
+def second_refused_with_mro_error(running: RunningDto) -> None:
     """`__class__` is state of the object, and the object is already wearing a role."""
-    assert isinstance(running['error'], TypeError)
-    assert 'consistent method resolution order' in str(running['error']).lower()
+    assert isinstance(running.error, TypeError)
+    assert 'consistent method resolution order' in str(running.error).lower()
 
 
 @then('the second one is refused as the name is taken')
-def second_refused_name_taken(running: dict) -> None:
+def second_refused_name_taken(running: RunningDto) -> None:
     """No class to collide over, so the refusal comes from `_bind` itself."""
-    assert isinstance(running['error'], RuntimeError)
-    assert 'already has' in str(running['error'])
+    assert isinstance(running.error, RuntimeError)
+    assert 'already has' in str(running.error)
 
 
 @when(parsers.parse('two threads run overlapping transfers out of it with the {binder} binder'))
-def two_overlapping_threads(accounts: dict, running: dict, binder: str) -> None:
+def two_overlapping_threads(accounts: AccountsByHolder, running: RunningDto, binder: str) -> None:
     """One slow transfer holds its roles across a gap the fast one arrives in.
 
     The gap is what makes the overlap deterministic instead of hopeful: the
@@ -322,7 +362,7 @@ def two_overlapping_threads(accounts: dict, running: dict, binder: str) -> None:
     """
     context_class = BINDERS[binder]
     shared = accounts['shared']
-    failures: list[tuple[str, str]] = running['failures']
+    failures = running.failures
     inside = threading.Event()
 
     def slow() -> None:
@@ -333,14 +373,14 @@ def two_overlapping_threads(accounts: dict, running: dict, binder: str) -> None:
                 time.sleep(0.3)
                 held.run_script()
         except Exception as exc:  # noqa: BLE001 -- the failure is the measurement
-            failures.append(('slow', type(exc).__name__))
+            failures.append(FailureDto('slow', type(exc).__name__))
 
     def fast() -> None:
         inside.wait(2)
         try:
             context_class(shared, Account('Grace', Money(0)), Money(7)).execute()
         except Exception as exc:  # noqa: BLE001 -- the failure is the measurement
-            failures.append(('fast', type(exc).__name__))
+            failures.append(FailureDto('fast', type(exc).__name__))
 
     threads = [threading.Thread(target=slow), threading.Thread(target=fast)]
     for thread in threads:
@@ -350,21 +390,21 @@ def two_overlapping_threads(accounts: dict, running: dict, binder: str) -> None:
 
 
 @then('the thread that arrived second fails')
-def second_thread_fails(accounts: dict, running: dict) -> None:
+def second_thread_fails(accounts: AccountsByHolder, running: RunningDto) -> None:
     """Loud, immediate, and at the scene of the crime -- only the slow transfer lands."""
-    assert running['failures'] == [('fast', 'TypeError')]
+    assert running.failures == [('fast', 'TypeError')]
     assert accounts['shared'].balance == Money(1_000_000 - 5)
 
 
 @then('both transfers complete')
-def both_transfers_complete(accounts: dict, running: dict) -> None:
+def both_transfers_complete(accounts: AccountsByHolder, running: RunningDto) -> None:
     """The second waits for the first instead of finding the slot taken."""
-    assert running['failures'] == []
+    assert running.failures == []
     assert accounts['shared'].balance == Money(1_000_000 - 5 - 7)
 
 
 @then('the thread that arrived second is refused')
-def second_thread_is_refused(accounts: dict, running: dict) -> None:
+def second_thread_is_refused(accounts: AccountsByHolder, running: RunningDto) -> None:
     """Turned away at bind time rather than writing over the roles already there.
 
     The same shape as the class binders, by a different route and with a
@@ -372,12 +412,12 @@ def second_thread_is_refused(accounts: dict, running: dict) -> None:
     has. What it buys is that the transfer already running is left alone and
     completes, rather than losing its methods to the other context's exit.
     """
-    assert running['failures'] == [('fast', 'RuntimeError')]
+    assert running.failures == [('fast', 'RuntimeError')]
     assert accounts['shared'].balance == Money(1_000_000 - 5)
 
 
 @when(parsers.parse('two threads run a transfer out of it and a transfer into it with the {binder} binder'))
-def two_threads_wanting_different_roles(accounts: dict, running: dict, binder: str) -> None:
+def two_threads_wanting_different_roles(accounts: AccountsByHolder, running: RunningDto, binder: str) -> None:
     """The overlap that raises nothing: one thread wants `SourceAccount`, the other `DestinationAccount`.
 
     `DestinationAccount` over `Account@SourceAccount` has a consistent MRO, so
@@ -394,7 +434,7 @@ def two_threads_wanting_different_roles(accounts: dict, running: dict, binder: s
     """
     context_class = BINDERS[binder]
     shared = accounts['shared']
-    failures: list[tuple[str, str]] = running['failures']
+    failures = running.failures
     paying_out_inside = threading.Event()
     paid_into_ran = threading.Event()
     paying_out_left = threading.Event()
@@ -407,7 +447,7 @@ def two_threads_wanting_different_roles(accounts: dict, running: dict, binder: s
                 paid_into_ran.wait(1)
                 held.run_script()
         except Exception as exc:  # noqa: BLE001 -- whatever escapes is the measurement
-            failures.append(('out', type(exc).__name__))
+            failures.append(FailureDto('out', type(exc).__name__))
         finally:
             paying_out_left.set()
 
@@ -420,7 +460,7 @@ def two_threads_wanting_different_roles(accounts: dict, running: dict, binder: s
                 paid_into_ran.set()
                 paying_out_left.wait(1)
         except Exception as exc:  # noqa: BLE001 -- whatever escapes is the measurement
-            failures.append(('in', type(exc).__name__))
+            failures.append(FailureDto('in', type(exc).__name__))
 
     threads = [threading.Thread(target=paying_out), threading.Thread(target=paid_into)]
     for thread in threads:
@@ -430,7 +470,7 @@ def two_threads_wanting_different_roles(accounts: dict, running: dict, binder: s
 
 
 @then('the account is left playing a role for good')
-def account_left_playing_a_role(accounts: dict, running: dict) -> None:
+def account_left_playing_a_role(accounts: AccountsByHolder, running: RunningDto) -> None:
     """Both transfers land, and the account never gets itself back.
 
     The context that leaves last restores the class it found on the way in,
@@ -440,15 +480,15 @@ def account_left_playing_a_role(accounts: dict, running: dict) -> None:
     stack `SourceAccount` on itself and finally produce the MRO error, in a
     request that did nothing wrong.
     """
-    assert running['failures'] == []
+    assert running.failures == []
     assert accounts['shared'].balance == Money(1_000_000 - 5 + 7)
     assert hasattr(accounts['shared'], 'transfer')
 
 
 @then('the account is itself again')
-def account_is_itself_again(accounts: dict, running: dict) -> None:
+def account_is_itself_again(accounts: AccountsByHolder, running: RunningDto) -> None:
     """Both transfers land and the account comes out of them holding nothing."""
-    assert running['failures'] == []
+    assert running.failures == []
     assert accounts['shared'].balance == Money(1_000_000 - 5 + 7)
     assert not hasattr(accounts['shared'], 'transfer')
     assert type(accounts['shared']) is Account
@@ -460,23 +500,25 @@ def account_is_itself_again(accounts: dict, running: dict) -> None:
 
 
 @when(parsers.parse('a role defining __lt__ is lent to an amount with the {binder} binder'))
-def lend_a_dunder(running: dict, binder: str) -> None:
+def lend_a_dunder(running: RunningDto, binder: str) -> None:
     """The role wants to make its player comparable, which only one binder allows."""
     amount = Money(5)
-    running['amount'] = amount
-    running['context'] = COMPARING[binder](amount)
-    running['context'].__enter__()
+    running.amount = amount
+    running.context = COMPARING[binder](amount)
+    running.context.__enter__()
 
 
 @then("the less-than operator on the amount runs the role's method")
-def operator_runs_the_role(running: dict) -> None:
+def operator_runs_the_role(running: RunningDto) -> None:
     """The synthesized class is a real class, so the operator finds the role's method."""
-    assert (running['amount'] < Money(1)) is True
-    running['context'].__exit__()
+    amount = running.amount
+    assert amount is not None
+    assert (amount < Money(1)) is True
+    running.opened().__exit__()
 
 
 @then('the less-than operator on the amount ignores the role')
-def operator_ignores_the_role(running: dict) -> None:
+def operator_ignores_the_role(running: RunningDto) -> None:
     """The role's `__lt__` never arrives, and would do nothing if it did.
 
     `InstanceContext` skips dunders when it binds, and the reason is the second
@@ -487,12 +529,13 @@ def operator_ignores_the_role(running: dict) -> None:
     False. `tests/unit/test_instance_roles.py` shows the other half: written in
     by hand, it answers when called by name and the operator walks past it.
     """
-    amount = running['amount']
+    amount = running.amount
+    assert amount is not None
     assert isinstance(amount.__lt__, types.MethodType)
     assert amount.__lt__.__qualname__.startswith('Money.'), 'the role should not have been lent at all'
     assert amount.__lt__(Money(1)) is False
     assert (amount < Money(1)) is False
-    running['context'].__exit__()
+    running.opened().__exit__()
 
 
 # ---------------------------------------------------------------------------
@@ -501,27 +544,29 @@ def operator_ignores_the_role(running: dict) -> None:
 
 
 @when(parsers.parse('a transfer out of it is attempted with the {binder} binder'))
-def attempt_doomed_transfer(accounts: dict, running: dict, binder: str) -> None:
+def attempt_doomed_transfer(accounts: AccountsByHolder, running: RunningDto, binder: str) -> None:
     """The source refuses, after the other two participants may already be bound."""
-    running['destination'] = accounts['Bob']
-    running['amount'] = Money(250)
+    running.destination = accounts['Bob']
+    running.amount = Money(250)
     try:
-        BINDERS[binder](accounts['Alice'], running['destination'], running['amount']).execute()
+        BINDERS[binder](accounts['Alice'], running.destination, running.amount).execute()
     except Exception as exc:  # noqa: BLE001 -- which exception is the Then's business
-        running['error'] = exc
+        running.error = exc
 
 
 @then('the transfer is refused')
-def the_transfer_is_refused(running: dict) -> None:
+def the_transfer_is_refused(running: RunningDto) -> None:
     """It failed, which is the premise rather than the finding."""
-    assert running['error'] is not None
+    assert running.error is not None
 
 
 @then('no participant is left holding a role')
-def no_participant_left_holding(running: dict) -> None:
+def no_participant_left_holding(running: RunningDto) -> None:
     """Whatever bound before the refusal was undone."""
-    assert not hasattr(running['destination'], 'receive')
-    assert not hasattr(running['amount'], 'withdraw_from')
+    assert running.destination is not None
+    assert running.amount is not None
+    assert not hasattr(running.destination, 'receive')
+    assert not hasattr(running.amount, 'withdraw_from')
 
 
 @then('no context is left running')

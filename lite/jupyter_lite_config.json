@@ -1,0 +1,6 @@
+{
+  "LiteBuildConfig": {
+    "contents": ["contents"],
+    "extra_ignore_contents": ["__pycache__", "\\.pyc$", "\\.pytest_cache"]
+  }
+}
