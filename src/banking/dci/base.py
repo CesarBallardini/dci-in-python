@@ -7,10 +7,10 @@ A binder supplies `_bind`; everything around it -- entering, releasing, the
 from __future__ import annotations
 
 import contextvars
-from typing import TYPE_CHECKING, Any, ClassVar, Self, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Self, cast, overload
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
 _current_context: contextvars.ContextVar[BaseContext] = contextvars.ContextVar('dci_context')
 
@@ -50,6 +50,31 @@ def context(expected: type | None = None) -> Any:
     return _current_context.get()
 
 
+def playing[Player](obj: object, player: type[Player]) -> Player:
+    """`obj`, seen as the role player it is while a context runs.
+
+    The one fact about role binding no type checker can follow. Inside the
+    `with`, the source account is an `Account@SourceAccount` -- a class built
+    at runtime, in no source file -- or an `Account` with `transfer` written
+    into its `__dict__`. Either way it has `.transfer()`, and either way a
+    checker still sees the `AccountLike` it was declared as.
+
+    `player` names what the object has become, usually a protocol such as
+    `banking.roles.money_transfer.SourceAccountPlayer`. Like `context()`, it is
+    deliberately not checked at runtime: the object is whatever `__enter__`
+    made of it. This is an assertion with a name, written where the binding
+    happens, rather than a `cast` repeated wherever a role is called.
+
+    Args:
+        obj: a participant of the running context.
+        player: the protocol or class it satisfies while the context runs.
+
+    Returns:
+        `obj`, unchanged.
+    """
+    return cast('Player', obj)
+
+
 class BaseContext:
     """A use case reified: an object that exists while it runs.
 
@@ -78,7 +103,7 @@ class BaseContext:
     that had already been spent.
     """
 
-    roles: ClassVar[dict[str, type]] = {}
+    roles: ClassVar[Mapping[str, type]] = {}
 
     #: Whether this instance is currently entered. A context represents a use
     #: case in progress, so entering the same one twice is a defect rather than

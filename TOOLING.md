@@ -17,10 +17,12 @@ strictly enough for the claim to mean something.
 * Python 3.14 (uv installs it automatically if missing, per `.python-version`)
 * Git
 * [OSV-Scanner](https://google.github.io/osv-scanner/) on `PATH` (only needed for `make security`; on Windows, `choco install osv-scanner`)
+* [Node.js](https://nodejs.org/) 24 with `npm` (only needed for `make test-pyodide`)
 
 The package has no runtime dependencies; the DCI mechanism uses only the
 standard library. Everything in the `dev` group of `pyproject.toml` exists to
-check the code, not to run it.
+check the code, not to run it, and everything in the `lite` group exists to
+build and check the browser site described below.
 
 # Getting started
 
@@ -40,17 +42,17 @@ them rewrites `uv.lock`. The reason is in *Updating dependencies* below.
 
 # What each tool is for
 
-* **[uv](https://docs.astral.sh/uv/)** for dependency and environment management, with separate groups (`dev` vs `deploy`).
+* **[uv](https://docs.astral.sh/uv/)** for dependency and environment management, with separate groups (`dev`, `deploy` and `lite`).
 * **[ruff](https://docs.astral.sh/ruff/)** as linter and formatter (`ruff.toml`). Single quotes, line length 119.
 * **[pyright](https://microsoft.github.io/pyright/)** + **[pyrefly](https://pyrefly.org/)** as two independent type checkers (`pyrightconfig.json`, `pyrefly.toml`). Both are run because this repository is largely about code a checker can only partly see, and two inference engines over the same code report different things. **Both must report 0 errors and 0 suppressed.** There is no `# type: ignore` or `# pyright: ignore` anywhere in the repository. Where a checker cannot see a runtime fact, the correct response is a commented `typing.cast` that states the fact.
 * **[bandit](https://bandit.readthedocs.io/)** (SAST) and **[pip-audit](https://pypi.org/project/pip-audit/)** + **[OSV-Scanner](https://google.github.io/osv-scanner/)** (SCA) against `uv.lock` (`bandit.yaml`). OSV-Scanner is a standalone Go binary rather than a PyPI package, so it is not installed through `uv`: locally it needs to be on `PATH` (`choco install osv-scanner` on Windows), and in CI it runs through Google's official reusable workflow (see `security.yml`).
-* **[pytest](https://docs.pytest.org/)** with tests separated by kind: `unit/`, `integration/` (a real SQLite database and [SQLAlchemy](https://www.sqlalchemy.org/)), and `acceptance/` (BDD via [pytest-bdd](https://pytest-bdd.readthedocs.io/), which is where the comparison tables from `README.md` and `APPROACHES.md` are expressed as `Scenario Outline`s). Configured in `pytest.ini`: markers are declared there with `--strict-markers` enabled, so a mistyped marker fails rather than silently selecting nothing, and one warning filter is scoped to a single deprecation in `gherkin-official`. There is no `e2e/` directory: this is a library, with no running instance to drive.
-* **[pre-commit](https://pre-commit.com/)** hooking lint, format, and lockfile checks before every commit.
+* **[pytest](https://docs.pytest.org/)** with tests separated by kind: `unit/`, `integration/` (a real SQLite database and [SQLAlchemy](https://www.sqlalchemy.org/)), and `acceptance/` (BDD via [pytest-bdd](https://pytest-bdd.readthedocs.io/), which is where the comparison tables from `README.md` and `APPROACHES.md` are expressed as `Scenario Outline`s). Configured in `pytest.ini`: markers are declared there with `--strict-markers` enabled, so a mistyped marker fails rather than silently selecting nothing, and one warning filter is scoped to a single deprecation in `gherkin-official`. `e2e/` drives the built browser site with Playwright, and is described under *Running in the browser*. Three more markers name a capability a WebAssembly runtime may lack (`threads`, `subprocess`, `event_loop`); `tests/conftest.py` probes for each one and skips the marked tests where it is missing, so on the desktop they change nothing.
+* **[pre-commit](https://pre-commit.com/)** hooking lint, format, and lockfile checks before every commit, and [nbstripout](https://github.com/kynan/nbstripout), which removes notebook outputs, so a committed notebook carries no output a fresh run has not produced.
 * A `Makefile` as the single entry point for every task.
 
 # Continuous integration
 
-Three independent GitHub Actions workflows in `.github/workflows/`, one per
+Four independent GitHub Actions workflows in `.github/workflows/`, one per
 concern, each with its own badge at the top of the README:
 
 | Workflow | What it runs |
@@ -58,11 +60,44 @@ concern, each with its own badge at the top of the README:
 | `check.yml` | lint + format + both type checkers |
 | `pytest.yml` | the suite, plus the demo as a smoke check |
 | `security.yml` | bandit + pip-audit + OSV-Scanner |
+| `lite.yml` | builds the browser site, runs every notebook under Pyodide in Node and in Chromium and Firefox, and on `main` publishes the site to GitHub Pages |
 
 Keeping them separate means a failing badge identifies which check failed
 without opening the run. The demo runs in CI because its output is quoted in
 the blog post: if it stops exiting 0, the post is quoting output that no longer
 occurs.
+
+# Running in the browser
+
+The notebooks in `notebooks/` run this repository's `banking` package on
+CPython 3.14 compiled to WebAssembly, in a static
+[JupyterLite](https://jupyterlite.readthedocs.io/) site that needs no server.
+Notebooks 01 to 04 follow the demo and `APPROACHES.md`; notebook 05 runs the
+test suite in the browser.
+
+* **[jupyterlite-core](https://pypi.org/project/jupyterlite-core/)** builds the site, and **[jupyterlite-pyodide-kernel](https://pypi.org/project/jupyterlite-pyodide-kernel/)** provides its kernel: [Pyodide](https://pyodide.org/) 314, which is CPython 3.14 for WebAssembly. Their configuration is `lite/jupyter_lite_config.json`.
+* **The wheel reaches the browser through the site.** `make lite` builds the `banking` wheel into `lite/pypi/`, which JupyterLite indexes for `piplite`, so a notebook installs this repository's code rather than a copy pasted into cells. The same target stages `lite/contents/`: the notebooks beside `tests/`, `pytest.ini` and `uv.lock`, which is the layout notebook 05 reads. Both directories are generated and ignored.
+* **pydantic comes from the Pyodide distribution.** `uv.lock` pins a `pydantic-core` that has no WebAssembly wheel, so notebook 05 installs the pydantic that Pyodide ships, and pins every other test dependency to the version in `uv.lock`. Notebook 04 prints the versions it ran with.
+* **Some tests skip in the browser.** Pyodide cannot start a thread or a process, and it runs an event loop from synchronous code only where the JavaScript engine supports JSPI. The tests that need one of those carry the `threads`, `subprocess` or `event_loop` marker and are skipped with that reason; nothing is edited to pass. Chromium and Firefox both support JSPI, so in either browser notebook 05 skips only the `threads` and `subprocess` tests.
+
+Four targets cover it:
+
+| Target | What it checks |
+| --- | --- |
+| `make notebooks` | every notebook runs on desktop CPython |
+| `make lite-serve` | builds the site and serves it on `http://localhost:8000`, for reading it in a browser |
+| `make test-pyodide` | every notebook runs under the Pyodide release the kernel bundles, in Node (`lite/pyodide/run_notebooks.mjs`), once without JSPI and once with it |
+| `make test-e2e` | every notebook of the built site runs in Chromium and Firefox, driven by [Playwright](https://playwright.dev/python/) (`tests/e2e/`) |
+
+`make test-pyodide` needs `node` and `npm` on the `PATH` of a non-interactive
+shell. A version manager that adds them lazily from a shell profile does not,
+and then the paths can be passed: `make test-pyodide NODE=/path/to/node
+NPM=/path/to/npm`. The `e2e` tests are deselected from `make test`, because
+they need the built site and installed browsers; `make test-e2e` provides both.
+
+`lite.yml` publishes the site to GitHub Pages on every push to `main`. That
+requires Pages to be enabled with *GitHub Actions* as its source, which is a
+repository setting the workflow cannot change.
 
 # Updating dependencies
 

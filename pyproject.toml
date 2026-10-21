@@ -37,3 +37,16 @@ dev = [
 deploy = [
     "docker",
 ]
+# The notebooks in the browser (JupyterLite) and on the desktop (nbclient).
+# The kernel is bounded to 0.8.x because that is the line built on Pyodide
+# 314, which is CPython 3.14; `requires-python` refuses anything older, and
+# the browser runtime has to be the same Python the repository measures.
+lite = [
+    "jupyterlite-core>=0.8,<0.9",
+    "jupyterlite-pyodide-kernel>=0.8,<0.9",
+    "jupyter-server",  # without it, `jupyter lite build` copies the contents but does not index them
+    "nbclient",
+    "ipykernel",
+    "nbstripout",
+    "pytest-playwright",  # tests/e2e: the built site, driven in a real browser
+]

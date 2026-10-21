@@ -12,7 +12,7 @@ The prose is split across three files, and an edit should land in the right one:
 | --- | --- |
 | `README.md` | what the mechanism is, the `make` targets, and the layout. It introduces; it does not measure |
 | `APPROACHES.md` | the four binders and the five designs, each with where it fails and what those failures mean, plus both comparison tables and the persistence finding |
-| `TOOLING.md` | prerequisites, what each tool is for, `--frozen` for one-off commands, CI, dependency updates, building a wheel |
+| `TOOLING.md` | prerequisites, what each tool is for, `--frozen` for one-off commands, CI, running in the browser, dependency updates, building a wheel |
 
 Each binder is described in `APPROACHES.md` alongside the failures it has and the
 failure it answers.
@@ -52,19 +52,23 @@ The layout follows the three letters, plus two packages for comparison:
 | `banking/services/` | The same use case as a service, without the mechanism |
 | `banking/alternatives/` | The two designs DCI argues against, plus the role-as-wrapper, one per module: `fat_account.py`, `anemic_service.py`, `role_as_wrapper.py` |
 
+Outside the package, `notebooks/` holds five notebooks that run the same material on CPython 3.14 compiled to WebAssembly, in a JupyterLite site built by `make lite` from `lite/`. Notebook 05 runs the test suite in the browser. `lite/pyodide/run_notebooks.mjs` runs every notebook under Pyodide in Node, and `tests/e2e/` runs them in Chromium and Firefox with Playwright. `TOOLING.md` describes the build.
+
 ### Things that cannot be inferred from one file
 
 **There are four binders, not one.** `Context` (reassigns `__class__`), `TransparentContext` (the same, with the synthesized class renamed to the data class), `SerializedContext` (the same, with participants locked) and `InstanceContext` (writes the role's methods into the instance). They share `BaseContext`; only `SerializedContext` overrides `__enter__` and `__exit__` as well as `_bind`. `APPROACHES.md` compares them cell by cell.
 
-**Roles are never instantiated and inherit from nothing.** They are classes written to be mixed into a data object's class at runtime. Each declares the protocol it requires of its player under `if TYPE_CHECKING:`; that block does not exist at runtime, and the synthesized `Account@SourceAccount` resolves those members on the data class.
+**Roles are never instantiated and inherit from nothing.** They are classes written to be mixed into a data object's class at runtime. Each states what it requires of its player as the type of `self`: `self: AccountLike` for the two account roles, and for `TransferAmount` a type variable bound to `MoneyLike` (`self: M`, `account: AccountLike[M]`). Neither checker accepts a concrete class there (`self: Money` is not a supertype of `TransferAmount`), only a protocol or a type variable bound to one. At runtime the synthesized `Account@SourceAccount` resolves those members on the data class.
 
-**A role reaches its peers through the context, never by reference.** A role calls `context(_RunningTransfer)`, the protocol declared at the bottom of `roles/money_transfer.py`. That protocol exists so roles never import concrete contexts: a context knows its roles, a role does not know its contexts. Unlike the protocols the role classes declare for their own players, `_RunningTransfer` exists **at runtime**, because it is passed as a value.
+**A role reaches its peers through the context, never by reference.** A role calls `context(_RunningTransfer)`, the protocol declared at the bottom of `roles/money_transfer.py`. That protocol exists so roles never import concrete contexts: a context knows its roles, a role does not know its contexts. Its members are typed as *players* -- `SourceAccountPlayer`, `DestinationAccountPlayer`, `TransferAmountPlayer`, in the same module: the data protocol plus the role's methods, written out by hand because Python has no intersection type. All of them exist **at runtime**; `_RunningTransfer` because it is passed as a value.
 
 **`context()` is generic, and that is what removed two casts.** It has two overloads: no argument returns a `BaseContext`, and `context(SomeProtocol)` returns that protocol. The argument is deliberately not inspected — checking it would mean an `isinstance` against a protocol on every role call — it states what the caller requires, for the type checker. Prefer this to a `cast` wherever a generic parameter can carry the fact.
 
+**`playing()` is the one seam no checker can follow.** `playing(obj, SourceAccountPlayer)` (in `dci/base.py`) asserts that a participant already plays its role inside the `with`; the contexts' `run_script()` is its caller in `src/`. Use it rather than a `cast` to a role class: a role annotates its own `self`, so `cast('SourceAccount', x).transfer()` no longer type-checks.
+
 **There are three roles, and the amount is one of them.** `TransferAmount` is why `SourceAccount.transfer()` takes **no parameters**: the amount is a participant with a part of its own, not an argument passed between functions.
 
-**`AccountLike` (in `data/account.py`) is load-bearing.** It is the structural protocol every account-shaped object satisfies. Its members are read-only properties, and `debit`/`credit` take the amount **positional-only** (`/`); without that, a conforming class would have to name the parameter `amount` exactly. This protocol is why the tests can pass the context slotted, attrs, pydantic and ORM-mapped objects with no suppressions.
+**`AccountLike` (in `data/account.py`) is load-bearing.** It is the structural protocol every account-shaped object satisfies, generic in the amount it holds: `AccountLike[M: MoneyLike = Money]`, so a bare `AccountLike` means `AccountLike[Money]`. Its members are read-only properties, and `debit`/`credit` take the amount **positional-only** (`/`); without that, a conforming class would have to name the parameter `amount` exactly. This protocol is why the tests can pass the context slotted, attrs, pydantic and ORM-mapped objects with no suppressions.
 
 **`BaseContext` carries two guards.** Binding is all-or-nothing (a failed `__enter__` unwinds and pops the ContextVar, otherwise a half-entered context stays installed for the rest of the thread's life), and a context is not re-entrant (a second `__enter__` would overwrite the first's token). `run_script()` is separate from `execute()` so that a caller already inside the context can run the interaction without re-entering.
 
@@ -76,6 +80,8 @@ The layout follows the three letters, plus two packages for comparison:
 
 **Zero type suppressions.** No `# type: ignore`, no `# pyright: ignore`. Both checkers must report **0 errors and 0 suppressed**. When a diagnostic appears, fix the cause; usually the answer is to widen a signature to a protocol rather than silence it. `typing.cast` is allowed where it states a runtime fact a checker cannot see (the synthesized role class; SQLAlchemy's `Mapped[str]`), and each one carries a comment explaining why.
 
+**The blog post quotes this code verbatim.** Every Python block in the post is a run of code lines copied from one file here (docstrings and comments cut), headed by that file's path. Changing a quoted line, or the definitions around it, means updating the post.
+
 **`Account` and `Money` must stay plain Python classes.** Neither `__slots__` nor `@dataclass(frozen=True)`: both make `__class__` reassignment illegal, so such a class cannot play a role under `Context`, `TransparentContext` or `SerializedContext`. `InstanceContext` does accept a frozen dataclass, but it is not the default and the demo and most tests use class binding, so converting either class will break the suite in ways that are hard to read.
 
 **`tests/unit/test_limits.py` asserts failures deliberately.** Those tests are expected to raise. If one starts failing, a Python version has changed something: investigate rather than repairing the test.
@@ -85,6 +91,14 @@ The layout follows the three letters, plus two packages for comparison:
 **`clear_mappers()` is global — never call it from a second place.** It un-instruments *every* mapped class in the process, including `test_orm_roles.py`'s module-level ones, which are mapped at import time. The acceptance fixture in `tests/acceptance/steps/test_role_binding_steps.py` maps its own classes and therefore disposes **its own registries** instead. Two callers of `clear_mappers()` make the suite order-dependent, and acceptance sorts before integration, so the failure is real rather than theoretical.
 
 **The comparison tables are executable.** `tests/acceptance/features/role_binding.feature` covers which domain objects can play a role and `role_binders.feature` covers the four binders cell by cell. Both tables live in `APPROACHES.md`, so neither can drift. Changing a table means changing an example row, and the reverse.
+
+**`SerializedContext` serializes threads, not asyncio tasks.** Its lock is an `RLock`, owned by a thread, and every task on an event loop runs on that thread. `tests/unit/test_async_overlap.py` asserts this deliberately, in the manner of `test_limits.py`, alongside the other three binders' answers under tasks. `APPROACHES.md` states it under the comparison table.
+
+**Three markers name a capability, and the runtime decides.** `threads`, `subprocess` and `event_loop` mark the tests that need one; `tests/conftest.py` probes for each capability and skips the marked tests where it is missing. A new test that starts a thread or a process, or calls `asyncio.run` from synchronous code, takes the marker, and a `.feature` scenario takes the matching Gherkin tag. Never edit a test to pass in the browser.
+
+**`e2e` tests are deselected by default.** They need the built site and installed browsers, so `pytest.ini` excludes them and `make test-e2e` provides both. `make lite` leaves `tests/e2e/` out of the site it builds.
+
+**Notebooks are committed without outputs.** A pre-commit hook runs `nbstripout`. Notebook 05 pins the test dependencies to `uv.lock` when it runs in the browser, except pydantic, which comes from the Pyodide distribution because the pinned `pydantic-core` has no WebAssembly wheel.
 
 **The whole repo is in English** — code, comments, docstrings, tests, docs and program output, `demo/dci_demo.py`'s section titles included.
 
@@ -96,11 +110,11 @@ The layout follows the three letters, plus two packages for comparison:
 
 **Conventions:** person names use the Alice / Bob / Charlie / Dave set. `Money` is an integer count of minor units plus a currency label, with no floats. ruff uses single quotes and a line length of 119.
 
-**Each tool keeps its own config file.** `pytest.ini` (markers, `--strict-markers`, and one warning filter scoped to a single deprecation in `gherkin-official`), `ruff.toml`, `pyrightconfig.json`, `pyrefly.toml`, `bandit.yaml`. `pyproject.toml` holds the project metadata, the build backend and the dependency groups, and no tool configuration.
+**Each tool keeps its own config file.** `pytest.ini` (markers, `--strict-markers`, and one warning filter scoped to a single deprecation in `gherkin-official`), `ruff.toml`, `pyrightconfig.json`, `pyrefly.toml`, `bandit.yaml`, `lite/jupyter_lite_config.json`. `pyproject.toml` holds the project metadata, the build backend and the dependency groups, and no tool configuration.
 
 ## Current state
 
-The code is complete and green: ruff clean, pyright 0 errors, pyrefly 0 errors **and 0 suppressed**, 150 tests passing, demo exits 0, security scans clean.
+The code is complete and green: ruff clean, pyright 0 errors, pyrefly 0 errors **and 0 suppressed**, 160 tests passing (plus 10 browser runs under `make test-e2e`), demo exits 0, security scans clean. Every notebook runs on the desktop, under Pyodide in Node, and in Chromium and Firefox.
 
 **The blog post is also complete.** All five phases of the plan, and the three later findings, have been applied: the console blocks, the code blocks and the diagram are synchronized with the repository; the four breakages are written up, including `@dataclass(frozen=True)` and `attrs`; the two `BaseContext` guards are explained; the four binders have their own section with the comparison table; the persistence finding has its own section; the five designs are compared; Feathers' objection is answered using the third role; and the arc back to part 1 is closed from both ends.
 

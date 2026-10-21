@@ -30,7 +30,7 @@ import threading
 import time
 import types
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import NamedTuple
 
 import attrs
 import pytest
@@ -38,9 +38,15 @@ import pytest
 from banking.contexts.money_transfer import InstanceMoneyTransferContext, MoneyTransferContext
 from banking.data.account import Account, InsufficientFundsError
 from banking.data.money import Money
+from banking.dci import playing
+from banking.roles.money_transfer import SourceAccountPlayer
 
-if TYPE_CHECKING:
-    from banking.roles.money_transfer import SourceAccount
+
+class FailureDto(NamedTuple):
+    """A thread that did not finish: which one, and the name of what it raised."""
+
+    thread: str
+    exception_name: str
 
 
 class SlottedAccount:
@@ -183,10 +189,11 @@ def test_the_type_never_stops_being_the_real_one(alice: Account, bob: Account) -
     with InstanceMoneyTransferContext(alice, bob, Money(10)):
         assert type(alice) is Account
         # Inside the context `alice` is playing `SourceAccount`; saying so is
-        # what makes `transfer` visible to a checker. Note the cast is to the
-        # *role*, not to the synthesized class -- there is no synthesized class
-        # here, which is the property this test exists to pin down.
-        transfer = cast('SourceAccount', alice).transfer
+        # what makes `transfer` visible to a checker. Note the assertion is to
+        # the *player protocol*, not to a synthesized class -- there is no
+        # synthesized class here, which is the property this test exists to pin
+        # down.
+        transfer = playing(alice, SourceAccountPlayer).transfer
         assert isinstance(transfer, types.MethodType)
         assert transfer.__qualname__ == 'SourceAccount.transfer'
 
@@ -221,6 +228,7 @@ def test_neither_binder_survives_pickling_but_they_fail_differently(alice: Accou
 
 
 @pytest.mark.unit
+@pytest.mark.subprocess
 def test_the_bytes_fail_in_whichever_process_reads_them(alice: Account, bob: Account) -> None:
     """The load failure crosses the process boundary, which is the cost itself.
 
@@ -443,6 +451,7 @@ def test_binding_will_not_clobber_an_attribute_the_object_owns() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.threads
 def test_the_collision_is_refused_with_real_threads() -> None:
     """Same refusal, served by two concurrent requests.
 
@@ -452,7 +461,7 @@ def test_the_collision_is_refused_with_real_threads() -> None:
     slow thread -- the request that had done nothing wrong -- completes.
     """
     shared = Account('Erin', Money(1_000_000))
-    failures: list[tuple[str, str]] = []
+    failures: list[FailureDto] = []
     role_bound = threading.Event()
 
     def slow_thread() -> None:
@@ -463,14 +472,14 @@ def test_the_collision_is_refused_with_real_threads() -> None:
                 time.sleep(0.3)  # the other thread binds and unbinds inside this gap
                 ctx.run_script()
         except (AttributeError, TypeError, RuntimeError) as exc:
-            failures.append(('slow', type(exc).__name__))
+            failures.append(FailureDto('slow', type(exc).__name__))
 
     def fast_thread() -> None:
         role_bound.wait(2)
         try:
             InstanceMoneyTransferContext(shared, Account('Grace', Money(0)), Money(7)).execute()
         except (AttributeError, TypeError, RuntimeError) as exc:
-            failures.append(('fast', type(exc).__name__))
+            failures.append(FailureDto('fast', type(exc).__name__))
 
     threads = [threading.Thread(target=slow_thread), threading.Thread(target=fast_thread)]
     for thread in threads:
@@ -480,4 +489,4 @@ def test_the_collision_is_refused_with_real_threads() -> None:
 
     # The thread that arrived second is the one that fails, and it says why.
     assert ('fast', 'RuntimeError') in failures
-    assert not [failure for failure in failures if failure[0] == 'slow']
+    assert not [failure for failure in failures if failure.thread == 'slow']

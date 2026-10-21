@@ -1,0 +1,43 @@
+name: lite
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  # Builds the JupyterLite site, runs every notebook under the kernel's Pyodide
+  # build in Node and then in two real browsers, and only then hands the site
+  # to the deploy job.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: uv sync --all-groups --frozen
+      # `test-pyodide` builds the site first, so `_site/` exists after it.
+      - run: make test-pyodide
+      - run: uv run --frozen playwright install --with-deps chromium firefox
+      - run: uv run --frozen pytest -m e2e --browser chromium --browser firefox
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          path: _site
+
+  # Publishing needs GitHub Pages enabled with "GitHub Actions" as its source,
+  # which is a repository setting the workflow cannot change.
+  deploy:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

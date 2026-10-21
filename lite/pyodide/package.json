@@ -1,0 +1,12 @@
+{
+  "name": "dci-in-python-pyodide-check",
+  "private": true,
+  "description": "Runs the notebooks under the Pyodide build the JupyterLite kernel uses, in Node instead of a browser.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "pyodide": "314.0.6"
+  }
+}

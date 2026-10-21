@@ -11,17 +11,25 @@ The output of this script is quoted in the blog post, so changing what it
 prints means the post has to be updated from a fresh run.
 """
 
+from __future__ import annotations
+
 import threading
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from banking.alternatives import SourceWrapper, WrappedTransfer
 from banking.contexts.money_transfer import MoneyTransferContext
 from banking.data.account import Account
 from banking.data.money import Money
+from banking.dci import Context
+from banking.roles.money_transfer import TransferAmount
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
 
 
-def d(title):
+def d(title: str) -> None:
     print(f'\n{"=" * 62}\n{title}\n{"=" * 62}')
 
 
@@ -59,14 +67,16 @@ d('5. Where class binding fails: __slots__')
 
 class SlottedAccount:
     __slots__ = ('balance', 'holder')
+    holder: str
+    balance: Money
 
-    def __init__(self, holder, balance):
+    def __init__(self, holder: str, balance: Money) -> None:
         self.holder, self.balance = holder, balance
 
-    def debit(self, m):
+    def debit(self, m: Money) -> None:
         self.balance = self.balance - m
 
-    def credit(self, m):
+    def credit(self, m: Money) -> None:
         self.balance = self.balance + m
 
 
@@ -79,19 +89,24 @@ d('5b. The same failure, reached by the idiomatic value object')
 
 
 @dataclass(frozen=True)
-class FrozenAccount:
-    holder: str
-    balance: Money
+class FrozenMoney:
+    amount: int
+    currency: str = 'ARS'
 
-    def debit(self, m):
-        object.__setattr__(self, 'balance', self.balance - m)
 
-    def credit(self, m):
-        object.__setattr__(self, 'balance', self.balance + m)
+# Only the amount's role. `MoneyTransferContext` is declared over `Money`, and
+# a full transfer would need a frozen `Money` everywhere, the accounts'
+# balances included. Binding is where it fails either way, and it fails here.
+class AmountOnlyContext(Context):
+    roles: ClassVar[Mapping[str, type]] = {'amount': TransferAmount}
+
+    def __init__(self, amount: FrozenMoney) -> None:
+        self.amount = amount
 
 
 try:
-    MoneyTransferContext(FrozenAccount('Alice', Money(100)), FrozenAccount('Bob', Money(0)), Money(10)).execute()
+    with AmountOnlyContext(FrozenMoney(10)):
+        pass
 except Exception as e:
     print(f'{type(e).__name__}: {e}')
 print('the field it refuses to assign is __class__')
@@ -113,11 +128,11 @@ c1.__exit__()
 print('after closing c1:', type(shared).__name__)
 
 d('6b. The same case, served by two threads')
-failures = []
+failures: list[tuple[str, str, str]] = []
 inside = threading.Event()
 
 
-def slow_thread():
+def slow_thread() -> None:
     try:
         ctx = MoneyTransferContext(shared, other, Money(5))
         with ctx:
@@ -128,7 +143,7 @@ def slow_thread():
         failures.append(('slow', type(e).__name__, str(e)))
 
 
-def fast_thread():
+def fast_thread() -> None:
     inside.wait(2)
     try:
         MoneyTransferContext(shared, third, Money(7)).execute()
@@ -162,8 +177,13 @@ d('8. Five ways to write the domain object, five outcomes')
 # tests/unit/test_limits.py.
 
 
-def check(style, build_pair):
-    """Build two accounts in the given style and attempt a full transfer."""
+def check(style: str, build_pair: Callable[[], tuple[Any, Any]]) -> None:
+    """Build two accounts in the given style and attempt a full transfer.
+
+    The pair is `Any` on purpose: some of these styles are not an `AccountLike`
+    to a type checker (a declarative `Mapped[str]` is a descriptor, not a `str`),
+    and finding out at runtime which ones still work is what this section is for.
+    """
     try:
         source, destination = build_pair()
         MoneyTransferContext(source, destination, Money(250)).execute()
@@ -184,10 +204,10 @@ try:
         impl = String
         cache_ok = True
 
-        def process_bind_param(self, value, dialect):
+        def process_bind_param(self, value: Money | None, dialect: object) -> str | None:
             return None if value is None else f'{value.amount}:{value.currency}'
 
-        def process_result_value(self, value, dialect):
+        def process_result_value(self, value: str | None, dialect: object) -> Money | None:
             if value is None:
                 return None
             amount, currency = value.split(':')
@@ -212,9 +232,9 @@ try:
         session.add(Account('Bob', Money(0)))
         session.commit()
 
-    def imperative_pair():
+    def imperative_pair() -> tuple[Account, Account]:
         session = Session(engine)
-        return session.get(Account, 'Alice'), session.get(Account, 'Bob')
+        return session.get_one(Account, 'Alice'), session.get_one(Account, 'Bob')
 
     check('SQLAlchemy imperative (from the DB)', imperative_pair)
 
@@ -227,10 +247,10 @@ try:
         holder: Mapped[str] = mapped_column(primary_key=True)
         balance: Mapped[Money] = mapped_column(MoneyType)
 
-        def debit(self, m):
+        def debit(self, m: Money) -> None:
             self.balance = self.balance - m
 
-        def credit(self, m):
+        def credit(self, m: Money) -> None:
             self.balance = self.balance + m
 
     check(
@@ -252,10 +272,10 @@ try:
         balance: Money
         model_config = {'arbitrary_types_allowed': True}
 
-        def debit(self, m):
+        def debit(self, m: Money) -> None:
             self.balance = self.balance - m
 
-        def credit(self, m):
+        def credit(self, m: Money) -> None:
             self.balance = self.balance + m
 
     check(
@@ -276,10 +296,10 @@ try:
         holder: str
         balance: Money
 
-        def debit(self, m):
+        def debit(self, m: Money) -> None:
             self.balance = self.balance - m
 
-        def credit(self, m):
+        def credit(self, m: Money) -> None:
             self.balance = self.balance + m
 
     check(
@@ -290,7 +310,21 @@ except ImportError:
     print('  (attrs not installed, skipped)')
 
 
-# The FrozenAccount from section 5b, reused: it is the same case.
+# The entity written the way section 5b wrote the value object: the same case.
+
+
+@dataclass(frozen=True)
+class FrozenAccount:
+    holder: str
+    balance: Money
+
+    def debit(self, m: Money) -> None:
+        object.__setattr__(self, 'balance', self.balance - m)
+
+    def credit(self, m: Money) -> None:
+        object.__setattr__(self, 'balance', self.balance + m)
+
+
 check('@dataclass(frozen=True)', lambda: (FrozenAccount('Alice', Money(1000)), FrozenAccount('Bob', Money(0))))
 
 print()

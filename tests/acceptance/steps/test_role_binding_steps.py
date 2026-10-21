@@ -10,7 +10,7 @@ that changed is the one that goes red.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import attrs
 import pytest
@@ -96,7 +96,7 @@ class PydanticAccount(BaseModel):
         self.balance = self.balance + amount
 
 
-STYLES: dict[str, Callable[[str, Money], Any]] = {
+STYLES: dict[str, Callable[[str, Money], AccountLike]] = {
     'a plain class': PlainAccount,
     'a frozen dataclass': FrozenAccount,
     'an attrs class': AttrsAccount,
@@ -197,31 +197,56 @@ def mapped() -> Iterator[MappedDomain]:
     Base.registry.dispose()
 
 
+@dataclass
+class ParticipantsDto:
+    """The source and the destination, however they ended up being written.
+
+    Empty until a `Given` step builds them. `session` is set only by the step
+    that loads them from a database, and a `Then` commits and closes it.
+    """
+
+    source: AccountLike | None = None
+    destination: AccountLike | None = None
+    session: Session | None = None
+
+    def pair(self) -> tuple[AccountLike, AccountLike]:
+        """The source and the destination, which every `When` and `Then` here needs."""
+        assert self.source is not None and self.destination is not None, 'no Given step built them'
+        return self.source, self.destination
+
+
+@dataclass
+class OutcomeDto:
+    """What the transfer did: `None` if it went through, the refusal if not."""
+
+    error: Exception | None = None
+
+
 @pytest.fixture
-def participants() -> dict[str, Any]:
+def participants() -> ParticipantsDto:
     """The source and the destination, however they ended up being written."""
-    return {}
+    return ParticipantsDto()
 
 
 @pytest.fixture
-def outcome() -> dict[str, Exception | None]:
+def outcome() -> OutcomeDto:
     """What the transfer did, so a `Then` can ask about it."""
-    return {'error': None}
+    return OutcomeDto()
 
 
 # ---------------------------------------------------------------------------
 
 
 @given(parsers.parse('a source and a destination written as {style}'))
-def written_as(participants: dict, style: str) -> None:
+def written_as(participants: ParticipantsDto, style: str) -> None:
     """Build the pair in the style named by the example row."""
     build = STYLES[style]
-    participants['source'] = build('Alice', Money(1000))
-    participants['destination'] = build('Bob', Money(0))
+    participants.source = build('Alice', Money(1000))
+    participants.destination = build('Bob', Money(0))
 
 
 @given(parsers.parse('a source and a destination mapped {mapping} and loaded from the database'))
-def mapped_and_loaded(participants: dict, mapped: MappedDomain, mapping: str) -> None:
+def mapped_and_loaded(participants: ParticipantsDto, mapped: MappedDomain, mapping: str) -> None:
     """Write two rows, then load them back in a fresh session -- as a real system would.
 
     Loading them back is the part that makes this worth a database: a role
@@ -239,44 +264,49 @@ def mapped_and_loaded(participants: dict, mapped: MappedDomain, mapping: str) ->
         session.commit()
 
     session = Session(mapped.engine)
-    participants['session'] = session
-    participants['source'] = session.get(cls, 'Alice')
-    participants['destination'] = session.get(cls, 'Bob')
+    participants.session = session
+    participants.source = session.get(cls, 'Alice')
+    participants.destination = session.get(cls, 'Bob')
 
 
 @when(parsers.parse('they run a transfer of {amount:d} with the role bound on the {binding}'))
-def run_transfer(participants: dict, outcome: dict, amount: int, binding: str) -> None:
+def run_transfer(participants: ParticipantsDto, outcome: OutcomeDto, amount: int, binding: str) -> None:
     """Run the one use case, lent out by the binder the example row names."""
     context = BINDERS[binding]
-    source: AccountLike = participants['source']
-    destination: AccountLike = participants['destination']
+    source, destination = participants.pair()
     try:
         context(source, destination, Money(amount)).execute()
     except Exception as exc:  # noqa: BLE001 -- which exception is the Then's business
-        outcome['error'] = exc
+        outcome.error = exc
 
 
 @then('the transfer succeeds')
-def transfer_succeeds(participants: dict, outcome: dict) -> None:
+def transfer_succeeds(participants: ParticipantsDto, outcome: OutcomeDto) -> None:
     """No refusal, and the money actually moved."""
-    assert outcome['error'] is None, f'refused with {outcome["error"]!r}'
-    assert participants['source'].balance == Money(750)
-    assert participants['destination'].balance == Money(250)
+    assert outcome.error is None, f'refused with {outcome.error!r}'
+    source, destination = participants.pair()
+    assert source.balance == Money(750)
+    assert destination.balance == Money(250)
 
 
 @then('the transfer is refused')
-def transfer_is_refused(participants: dict, outcome: dict) -> None:
+def transfer_is_refused(participants: ParticipantsDto, outcome: OutcomeDto) -> None:
     """The mechanism said no, and nothing moved."""
-    assert outcome['error'] is not None, 'expected a refusal, the transfer went through'
-    assert participants['source'].balance == Money(1000)
-    assert participants['destination'].balance == Money(0)
+    assert outcome.error is not None, 'expected a refusal, the transfer went through'
+    source, destination = participants.pair()
+    assert source.balance == Money(1000)
+    assert destination.balance == Money(0)
 
 
 @then(parsers.parse('reloading them in a new session shows {source_left:d} and {destination_left:d}'))
-def reloading_shows(participants: dict, mapped: MappedDomain, source_left: int, destination_left: int) -> None:
+def reloading_shows(
+    participants: ParticipantsDto, mapped: MappedDomain, source_left: int, destination_left: int
+) -> None:
     """The role mutated a real row, not a copy in memory."""
-    participants['session'].commit()
-    participants['session'].close()
+    loaded_in = participants.session
+    assert loaded_in is not None, 'no Given step loaded them from the database'
+    loaded_in.commit()
+    loaded_in.close()
 
     with Session(mapped.engine) as session:
         source = session.get(mapped.imperative, 'Alice')

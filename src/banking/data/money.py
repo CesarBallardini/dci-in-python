@@ -3,6 +3,24 @@
 from __future__ import annotations
 
 import functools
+from typing import Protocol, Self
+
+
+class MoneyLike(Protocol):
+    """What a transfer needs of an amount: that it can be compared with another.
+
+    Structural, like `banking.data.account.AccountLike`, and as small as the
+    roles allow: `TransferAmount` asks a balance whether it covers the amount,
+    and hands the amount to `debit` and `credit` untouched. Arithmetic is the
+    account's business, so it is not required here.
+
+    `Money` satisfies it without naming it; `functools.total_ordering` supplies
+    the `__ge__`.
+    """
+
+    def __ge__(self, other: Self, /) -> bool:
+        """Whether this amount is at least `other`."""
+        ...
 
 
 class CurrencyMismatchError(Exception):
@@ -32,9 +50,9 @@ class Money:
     Deliberately not written as `@dataclass(frozen=True)`, which would be the
     idiomatic form. A frozen dataclass rejects every `__setattr__`, `__class__`
     included, so it could not play the `TransferAmount` role under `Context`.
-    `tests/unit/test_limits.py` asserts this. The cause differs from the
-    `__slots__` case -- there the object layout is what blocks reassignment --
-    but the outcome is the same.
+    `tests/unit/test_limits.py::test_a_frozen_value_object_cannot_play_the_amount`
+    asserts this. The cause differs from the `__slots__` case -- there the
+    object layout is what blocks reassignment -- but the outcome is the same.
     """
 
     def __init__(self, amount: int, currency: str = 'ARS') -> None:

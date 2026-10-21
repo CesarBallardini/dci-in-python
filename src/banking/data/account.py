@@ -5,16 +5,22 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from banking.data.money import Money
+    from banking.data.money import Money, MoneyLike
 
 
-class AccountLike(Protocol):
+class AccountLike[M: MoneyLike = Money](Protocol):
     """Everything a transfer needs of whatever is playing an account.
 
     The protocol is structural, so a class satisfies it without referring to
     it: `Account`, a slotted class, a frozen dataclass, an ORM entity and a
-    pydantic model all match. It states once, where a type checker can use it,
-    the same implicit contract the roles declare under `if TYPE_CHECKING:`.
+    pydantic model all match. It is the implicit contract of the account roles
+    written down once, where a type checker can use it: the roles annotate
+    their `self` with it.
+
+    Generic in the kind of amount it holds, so that `TransferAmount` can say
+    "an account holding amounts like me" without naming `Money`. The default
+    makes a bare `AccountLike` mean `AccountLike[Money]`, which is what every
+    caller outside the roles wants.
 
     `holder` and `balance` are read-only members, because reading is all a role
     does with them. Whether they can be assigned is the data object's concern,
@@ -34,15 +40,15 @@ class AccountLike(Protocol):
         ...
 
     @property
-    def balance(self) -> Money:
+    def balance(self) -> M:
         """The current balance."""
         ...
 
-    def debit(self, amount: Money, /) -> None:
+    def debit(self, amount: M, /) -> None:
         """Remove `amount` from the balance."""
         ...
 
-    def credit(self, amount: Money, /) -> None:
+    def credit(self, amount: M, /) -> None:
         """Add `amount` to the balance."""
         ...
 

@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
 from banking.data.money import CurrencyMismatchError, Money
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 @pytest.mark.unit
@@ -37,7 +42,7 @@ def test_ordering_within_one_currency() -> None:
 
 @pytest.mark.unit
 @pytest.mark.parametrize('operation', [lambda a, b: a + b, lambda a, b: a - b, lambda a, b: a < b])
-def test_different_kinds_of_money_never_mix(operation) -> None:
+def test_different_kinds_of_money_never_mix(operation: Callable[[Money, Money], object]) -> None:
     with pytest.raises(CurrencyMismatchError):
         operation(Money(100, 'ARS'), Money(100, 'USD'))
 
