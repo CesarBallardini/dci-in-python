@@ -20,7 +20,7 @@ make demo
 make test
 ```
 
-The same code also runs in the browser, on CPython 3.14 compiled to WebAssembly, with nothing installed: [the notebooks](https://cesarballardini.github.io/dci-in-python/) walk through the demo and run the test suite. The first load downloads the Python runtime and takes a while.
+The same code also runs in the browser, on CPython 3.14 compiled to WebAssembly, with nothing installed: [the notebooks](https://katra.ballardini.com.ar/dci-in-python/) run the examples of the blog post and the test suite. The first load downloads the Python runtime and takes a while.
 
 Every task goes through the Makefile. `make` with no target prints this list:
 
@@ -110,10 +110,10 @@ src/banking/
 demo/
   dci_demo.py                 # the transfer, the four breakages, and the five styles
 notebooks/                    # the same material, run in the browser
-  01-the-mechanism.ipynb      # roles bound, temporary, and identity kept
+  01-the-mechanism.ipynb      # the two conventional versions, then roles bound, temporary, identity kept
   02-four-binders.ipynb       # the four binders, pickle, and a role that contributes a dunder
   03-where-python-says-no.ipynb  # the breakages, and the overlap reproduced with asyncio tasks
-  04-five-designs.ipynb       # the five styles, and which domain objects can play a role
+  04-five-designs.ipynb       # which domain objects can play a role, the wrapper, and the service
   05-run-the-tests.ipynb      # the test suite, run by pytest in the notebook
 lite/
   jupyter_lite_config.json    # the JupyterLite site build

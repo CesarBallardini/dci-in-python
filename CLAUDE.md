@@ -98,7 +98,7 @@ Outside the package, `notebooks/` holds five notebooks that run the same materia
 
 **`e2e` tests are deselected by default.** They need the built site and installed browsers, so `pytest.ini` excludes them and `make test-e2e` provides both. `make lite` leaves `tests/e2e/` out of the site it builds.
 
-**Notebooks are committed without outputs.** A pre-commit hook runs `nbstripout`. Notebook 05 pins the test dependencies to `uv.lock` when it runs in the browser, except pydantic, which comes from the Pyodide distribution because the pinned `pydantic-core` has no WebAssembly wheel.
+**Notebooks are committed without outputs.** A pre-commit hook runs `nbstripout`. In the browser, notebook 05 installs the test suite's dependency closure from `uv.lock` with `deps=False`, so micropip resolves nothing and the result does not depend on download order, and then pydantic from the Pyodide distribution, because the pinned `pydantic-core` has no WebAssembly wheel. A new direct test dependency has to be added to the closure's roots in that cell. Do not reach for `reinstall=True` when two versions conflict: it hides the conflict instead of removing it.
 
 **The whole repo is in English** — code, comments, docstrings, tests, docs and program output, `demo/dci_demo.py`'s section titles included.
 

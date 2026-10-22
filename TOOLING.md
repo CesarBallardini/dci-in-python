@@ -72,12 +72,15 @@ occurs.
 The notebooks in `notebooks/` run this repository's `banking` package on
 CPython 3.14 compiled to WebAssembly, in a static
 [JupyterLite](https://jupyterlite.readthedocs.io/) site that needs no server.
-Notebooks 01 to 04 follow the demo and `APPROACHES.md`; notebook 05 runs the
-test suite in the browser.
+Notebooks 01 to 04 follow the examples of the blog post, the demo and
+`APPROACHES.md`, and each one that touches an example the browser cannot run
+ends with a section stating which one and why. Notebook 05 runs the test suite
+in the browser.
 
 * **[jupyterlite-core](https://pypi.org/project/jupyterlite-core/)** builds the site, and **[jupyterlite-pyodide-kernel](https://pypi.org/project/jupyterlite-pyodide-kernel/)** provides its kernel: [Pyodide](https://pyodide.org/) 314, which is CPython 3.14 for WebAssembly. Their configuration is `lite/jupyter_lite_config.json`.
 * **The wheel reaches the browser through the site.** `make lite` builds the `banking` wheel into `lite/pypi/`, which JupyterLite indexes for `piplite`, so a notebook installs this repository's code rather than a copy pasted into cells. The same target stages `lite/contents/`: the notebooks beside `tests/`, `pytest.ini` and `uv.lock`, which is the layout notebook 05 reads. Both directories are generated and ignored.
-* **pydantic comes from the Pyodide distribution.** `uv.lock` pins a `pydantic-core` that has no WebAssembly wheel, so notebook 05 installs the pydantic that Pyodide ships, and pins every other test dependency to the version in `uv.lock`. Notebook 04 prints the versions it ran with.
+* **The test dependencies are installed as a fixed set.** Notebook 05 follows `uv.lock` from the suite's direct dependencies to every package that applies on the platform, and installs exactly that closure with `deps=False`. micropip resolves requirements concurrently, so a requirement left to resolution could arrive at a version that depends on the order of the downloads; with the closure pinned there is nothing to resolve. A new direct test dependency has to be added to the roots in that cell.
+* **pydantic comes from the Pyodide distribution.** `uv.lock` pins a `pydantic-core` that has no WebAssembly wheel, so notebook 05 installs the pydantic that Pyodide ships, with its own dependencies, in a second call made after the pinned set, and prints what arrived. Notebook 04 prints the library versions it ran with.
 * **Some tests skip in the browser.** Pyodide cannot start a thread or a process, and it runs an event loop from synchronous code only where the JavaScript engine supports JSPI. The tests that need one of those carry the `threads`, `subprocess` or `event_loop` marker and are skipped with that reason; nothing is edited to pass. Chromium and Firefox both support JSPI, so in either browser notebook 05 skips only the `threads` and `subprocess` tests.
 
 Four targets cover it:

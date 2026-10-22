@@ -75,7 +75,12 @@ def run_all_cells(page: Page, url: str) -> str:
     [
         pytest.param(
             '01-the-mechanism.ipynb',
-            ['inside:   type(a).__name__ = Account@SourceAccount', 'same id outside? True'],
+            [
+                'the account defines transfer_to: True',
+                'methods AnemicAccount defines: []',
+                'inside:   type(a).__name__ = Account@SourceAccount',
+                'same id outside? True',
+            ],
             id='01',
         ),
         pytest.param(
@@ -88,12 +93,26 @@ def run_all_cells(page: Page, url: str) -> str:
         ),
         pytest.param(
             '03-where-python-says-no.ipynb',
-            ["RuntimeError: can't start new thread", 'InstanceContext      balance 1000002, and after both left'],
+            [
+                # Wrapped at 76 columns, as the post quotes it.
+                "RuntimeError: Account already has 'transfer': instance binding will not\n"
+                'overwrite it. Another context is playing this role, or the object defines\n'
+                'that name itself.',
+                "RuntimeError: can't start new thread",
+                'InstanceContext      balance 1000002, and after both left the account is Account, with no role',
+                'the next transfer out of it raises TypeError',
+            ],
             id='03',
         ),
         pytest.param(
             '04-five-designs.ipynb',
-            ['BREAKS SQLAlchemy declarative', 'WORKS  SQLAlchemy declarative'],
+            [
+                'BREAKS SQLAlchemy declarative',
+                'WORKS  SQLAlchemy declarative',
+                'isinstance(roles.source, Account) -> False',
+                # Only the service moves the money for an attrs class.
+                'WORKS  attrs @define (slots by default)       -> 750 / 250',
+            ],
             id='04',
         ),
         pytest.param('05-run-the-tests.ipynb', ['pytest exit code: 0'], id='05'),
